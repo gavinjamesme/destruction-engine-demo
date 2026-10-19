@@ -50,10 +50,18 @@ body { background: #8fb2d6; color: var(--ink); font-family: var(--mono); overflo
   padding-right: max(12px, env(safe-area-inset-right, 0px));
   background: var(--deck);
   border-top: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 8px;
+  /* Wide: dropdowns and buttons in one row, the hint below. Narrow (phones): the dropdowns get the whole first row,
+     the buttons share the second with the hint. */
+  display: grid; grid-template-columns: 1fr auto; grid-template-areas: "bar tools" "hint hint"; gap: 8px; align-items: end;
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
 }
-.bar { display: flex; gap: 8px; align-items: flex-end; }
+.bar { grid-area: bar; display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
+.tools { grid-area: tools; display: flex; gap: 8px; }
+.deck .hint { grid-area: hint; }
+@media (max-width: 520px) {
+  .deck { grid-template-areas: "bar bar" "hint tools"; align-items: center; }
+  .deck .hint { text-align: left; }
+}
 .field { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .field span { font-family: var(--display); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
 .btn, select {
@@ -63,6 +71,8 @@ body { background: #8fb2d6; color: var(--ink); font-family: var(--mono); overflo
 }
 select { width: 100%; text-transform: none; font-family: var(--mono); font-weight: 500; font-size: 14px; letter-spacing: 0; }
 .btn.icon { flex: 0 0 auto; width: 44px; padding: 0; display: grid; place-items: center; }
+.btn.add { position: relative; }
+.btn.add select { position: absolute; inset: 0; opacity: 0; cursor: pointer; min-height: 0; padding: 0; }
 .btn.icon[aria-expanded="true"], .btn.toggle[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
 .btn:focus-visible, select:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -99,6 +109,17 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
   <div class="bar">
     <label class="field"><span>Hit with</span><select id="impact" aria-label="What hits it"></select></label>
     <label class="field"><span>Target</span><select id="target" aria-label="Material or object"></select></label>
+  </div>
+  <div class="tools">
+    <label class="btn icon add" title="Add another object">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+      <span class="sr">Add another object</span>
+      <select id="add" aria-label="Add another object"></select>
+    </label>
+    <button class="btn icon" id="reset-now" type="button" title="Put it back">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 5a7 7 0 1 1-6.6 4.7l1.9.6A5 5 0 1 0 12 7v3L7.5 6 12 2v3z"/></svg>
+      <span class="sr">Put it back</span>
+    </button>
     <button class="btn icon" id="settings-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings" title="Settings">
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 6h11.2a3 3 0 0 1 5.6 0H21v2h-1.2a3 3 0 0 1-5.6 0H3V6zm14 1a1 1 0 1 0 0-.01zM3 16h3.2a3 3 0 0 1 5.6 0H21v2h-9.2a3 3 0 0 1-5.6 0H3v-2zm6 1a1 1 0 1 0 0-.01z"/></svg>
       <span class="sr">Settings</span>
@@ -107,13 +128,15 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
   <div class="hint" id="hint">Tap to hit · drag to orbit · pinch to zoom</div>
 </div>
 <div class="sheet" id="settings" role="dialog" aria-label="Settings" hidden>
-  <div class="sheet-row"><span>Blast wave in front of it</span><button class="btn" id="blast" type="button">Set off</button></div>
+  <div class="sheet-row"><span>Blast wave in front of it all</span><button class="btn" id="blast" type="button">Set off</button></div>
+  <div class="sheet-row"><span>Sound</span><button class="btn toggle" id="sound" type="button" aria-pressed="true">On</button></div>
   <div class="sheet-row"><span>Slow motion</span><button class="btn toggle" id="slow" type="button" aria-pressed="false">Off</button></div>
   <div class="sheet-row"><span>Detail</span>
     <select id="detail" aria-label="Detail"><option value="0">Cheap</option><option value="1">Normal</option><option value="2">Cinematic</option></select></div>
   <div class="sheet-row"><span>How a hit's energy is shared</span>
     <select id="budget" aria-label="Energy sharing"><option value="1">Weighted</option><option value="2">Nearest first</option><option value="0">Off (each piece full)</option></select></div>
   <div class="sheet-row"><span>Soft-body wobble</span><button class="btn toggle" id="soft" type="button" aria-pressed="false">Off</button></div>
+  <div class="sheet-row"><span>Show break lines (for developers)</span><button class="btn toggle" id="lines" type="button" aria-pressed="false">Off</button></div>
   <div class="sheet-row"><span>Break it a different way</span><button class="btn" id="reset" type="button">New pattern</button></div>
   <div class="legend">
     <span><i style="background:var(--break)"></i>break</span><span><i style="background:var(--crumble)"></i>crumble</span>
@@ -145,7 +168,7 @@ const note = (t) => { $("loading-note").textContent = t; };
 
 const sim = new Worker(new URL("sim-worker.js", import.meta.url), { type: "module" });
 const state = {
-  impact: 3, slow: false, soft: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
+  impact: 3, slow: false, soft: false, breakLines: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
   size: [5, 3, 0.6], scale: 1, info: null, loose: 0, threads: 0, counts: { break: 0, crumble: 0, debris_hit: 0, deform: 0 },
 };
 const chunks = new Map();   // chunk id -> { mesh, body }
@@ -194,31 +217,64 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------- chunk meshes
 // The engine's finished vertex buffer (position, normal, uv and a tag per vertex) arrives from the worker; this only
 // tints it and passes it to the GPU.
-function chunkGeometry(c, verts) {
+function chunkGeometry(c, o, verts) {
   const g0 = performance.now();
   perf.chunkMeshesDrawn++;
   const count = verts.length / 9;
   const col = new Float32Array(count * 3);
-  const tint = state.info.tint, shade = 0.42;
-  const tone = 0.94 + 0.12 * (((c * 2654435761) >>> 0) % 1000) / 1000;  // pieces vary a little
-  for (let v = 0; v < count; v++) {
-    const k = verts[v * 9 + 8] === 0 ? shade : tone;  // broken faces darker
-    col[v * 3] = tint[0] * k; col[v * 3 + 1] = tint[1] * k; col[v * 3 + 2] = tint[2] * k;
-  }
+  tintChunk(c, verts, col, onRange.get(o).info);
   const inter = new THREE.InterleavedBuffer(verts, 9);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.InterleavedBufferAttribute(inter, 3, 0));
   geo.setAttribute("normal", new THREE.InterleavedBufferAttribute(inter, 3, 3));
   geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  // Two groups: the outer surface (material 0), then the faces made by breaking (material 1, which can be hidden).
+  const outer = [], inner = [];
+  for (let t = 0; t < count; t += 3) (verts[t * 9 + 8] === 0 ? inner : outer).push(t, t + 1, t + 2);
+  geo.setIndex([...outer, ...inner]);
+  geo.addGroup(0, outer.length, 0);
+  geo.addGroup(outer.length, inner.length, 1);
   perf.upload += performance.now() - g0;
   return geo;
 }
-let chunkMaterial = null;
-function makeChunkMaterial() {
-  const o = state.info.opacity;
-  chunkMaterial = new THREE.MeshStandardMaterial({
-    vertexColors: true, roughness: state.info.family === "metal" ? 0.35 : 0.85, metalness: state.info.family === "metal" ? 0.55 : 0,
-    transparent: o < 1, opacity: Math.max(o, 0.25), side: THREE.DoubleSide, flatShading: true,
+// An intact object is one colour all over (players never see where it will break); faces made by breaking are
+// darker. With "show break lines" on, each piece gets its own shade, so developers can see the pattern.
+function tintChunk(c, verts, col, info) {
+  const tint = info.tint, shade = 0.42;
+  const tone = state.breakLines ? 0.8 + 0.4 * (((c * 2654435761) >>> 0) % 1000) / 1000 : 1;
+  for (let v = 0, count = verts.length / 9; v < count; v++) {
+    const k = verts[v * 9 + 8] === 0 ? shade : tone;
+    col[v * 3] = tint[0] * k; col[v * 3 + 1] = tint[1] * k; col[v * 3 + 2] = tint[2] * k;
+  }
+}
+function retintAll() {
+  for (const [c, e] of chunks) {
+    const geo = e.mesh.geometry, col = geo.attributes.color;
+    tintChunk(c, geo.attributes.position.data.array, col.array, onRange.get(e.o).info);
+    col.needsUpdate = true;
+  }
+}
+// Every object on the range: object id -> { info (its material), label, size, at, material (for drawing) }.
+const onRange = new Map();
+const hiddenMaterial = new THREE.MeshBasicMaterial({ visible: false });
+// See-through objects (glass, clear plastic, jelly) would show where their pieces meet inside: those faces stay hidden
+// while a piece is still joined to others in one body, and show once it is on its own (or with "show break lines").
+function chunkMaterials(o, joined) {
+  const obj = onRange.get(o);
+  const hideInside = joined && obj.info.opacity < 1 && !state.breakLines;
+  return [obj.material, hideInside ? hiddenMaterial : obj.material];
+}
+function refreshMaterials() {
+  for (const e of chunks.values()) {
+    const b = bodies.get(e.body);
+    e.mesh.material = chunkMaterials(e.o, !b || b.group.children.length > 1);
+  }
+}
+function makeChunkMaterial(info) {
+  const o = info.opacity;
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: info.family === "metal" ? 0.35 : 0.85, metalness: info.family === "metal" ? 0.55 : 0,
+    transparent: o < 1, opacity: Math.max(o, 0.25), side: o < 1 ? THREE.FrontSide : THREE.DoubleSide,
   });
 }
 
@@ -228,10 +284,11 @@ function applyOps(ops) {
   for (const o of ops) {
     switch (o.op) {
       case "add": {
-        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.verts), chunkMaterial);
+        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.o, o.verts), chunkMaterials(o.o, true));
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.chunk = o.c;
-        chunks.set(o.c, { mesh, body: 0 });
+        mesh.userData.o = o.o;
+        chunks.set(o.c, { mesh, body: 0, o: o.o });
         break;
       }
       case "retire": {
@@ -270,11 +327,12 @@ function applyOps(ops) {
         const e = chunks.get(o.c);
         if (!e) break;
         e.mesh.geometry.dispose();
-        e.mesh.geometry = chunkGeometry(o.c, o.verts);
+        e.mesh.geometry = chunkGeometry(o.c, e.o, o.verts);
         break;
       }
     }
   }
+  if (ops.length && [...onRange.values()].some((v) => v.info.opacity < 1)) refreshMaterials();  // pieces joined or split
 }
 function applyPoses(p) {
   for (let i = 0; i < p.length; i += 8) {
@@ -285,9 +343,10 @@ function applyPoses(p) {
   }
 }
 function applyEvents(events, extra) {
-  for (const [type, x, y, z, intensity] of events) {
+  for (const [type, x, y, z, intensity, family, mass, energy] of events) {
     state.counts[type] = (state.counts[type] || 0) + 1;
     addMarker(type, x, y, z, intensity);
+    playSound(type, x, y, z, family, mass, energy);
   }
   for (const [type, x, y, z, intensity] of extra) addMarker(type, x, y, z, intensity);
 }
@@ -324,25 +383,69 @@ function clearScene() {
   clearEffects();
   clearProjectiles();
 }
-// Asks the worker for a new target; it answers with a frame carrying `built` (and the target's first pieces).
+// Ready-made scenes: several objects together, to see how they break each other. Each item is a target (a material
+// or a ready-made object), where its base stands, and for materials its size and anchoring (1 free, 2 on the ground,
+// 3 held at its edges).
+const SCENES = {
+  alley: { label: "Back alley", items: [
+    { target: "material:brick", size: [4, 2.4, 0.3], at: [0, 0, -0.8] },
+    { target: "object:trash_bin", at: [-1.3, 0, 0.1] }, { target: "object:oil_drum", at: [0.1, 0, 0.15] },
+    { target: "object:cardboard_box", at: [1.2, 0, 0.25] }, { target: "object:cardboard_box", at: [1.25, 0.31, 0.22] },
+    { target: "object:bucket", at: [0.8, 0, 1.0] }, { target: "object:soda_can", at: [-0.5, 0, 0.9] },
+  ] },
+  shop: { label: "Shop window", items: [
+    { target: "material:glass", size: [2.6, 1.6, 0.04], at: [0, 0.6, 0.6], anchor: 3 },
+    { target: "material:wood", size: [1.6, 0.6, 0.5], at: [0, 0, -0.3], anchor: 2 },
+    { target: "object:plastic_bottle", at: [-0.5, 0.6, -0.3] }, { target: "object:plastic_bottle", at: [-0.3, 0.6, -0.25] },
+    { target: "object:soda_can", at: [0.1, 0.6, -0.3] }, { target: "object:soda_can", at: [0.25, 0.6, -0.35] },
+    { target: "object:plush_toy", at: [0.55, 0.6, -0.3] },
+  ] },
+  tower: { label: "Block tower", items: (() => {
+    const out = [];
+    for (let row = 0; row < 6; row++)
+      for (let i = 0; i < 3; i++)
+        out.push({ target: "material:cinder_block", size: [0.4, 0.2, 0.2], anchor: 1, at: [(i - 1) * 0.41 + (row % 2 ? 0.2 : 0), row * 0.201, 0] });
+    return out;
+  })() },
+  soft: { label: "Soft things", items: [
+    { target: "object:mattress", at: [0, 0, 0] }, { target: "object:pillow", at: [-0.3, 0.25, -0.5] },
+    { target: "object:plush_toy", at: [0.3, 0.25, 0.2] }, { target: "object:jelly", at: [-0.3, 0.25, 0.5] },
+    { target: "object:clay_lump", at: [0.4, 0.25, -0.4] }, { target: "object:rubber_ball", at: [-0.1, 0.25, 0.0] },
+  ] },
+};
+// Asks the worker for the target (one thing, or a scene); it answers with a frame carrying `built`.
 function build() {
-  sim.postMessage({ type: "build", target: state.target, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
+  const [kind, name] = state.target.split(":");
+  const items = kind === "scene" ? SCENES[name].items : [{ target: state.target }];
+  sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
 }
 function onBuilt(b) {
-  clearScene();
-  state.info = b.info;
-  state.size = b.size;
+  if (b.replaced) {
+    clearScene();
+    onRange.clear();
+    state.counts = { break: 0, crumble: 0, debris_hit: 0, deform: 0 };
+    $("log").textContent = " ";
+  }
+  for (const v of b.objects)
+    if (!onRange.has(v.o)) onRange.set(v.o, { ...v, material: makeChunkMaterial(v.info) });
   state.scale = b.scale;
-  makeChunkMaterial();
-  const size = b.size, span = Math.max(size[0], size[1], size[2]);
-  view.target.set(0, size[1] / 2, 0);
-  // Portrait screens see less across, so stand further back.
+  // Frame everything: the middle of all the objects, far enough back to see them all (portrait screens see less
+  // across, so stand further back).
+  const lo = [Infinity, 0, Infinity], hi = [-Infinity, 0, -Infinity];
+  for (const v of onRange.values()) {
+    lo[0] = Math.min(lo[0], v.at[0] - v.size[0] / 2); hi[0] = Math.max(hi[0], v.at[0] + v.size[0] / 2);
+    hi[1] = Math.max(hi[1], v.at[1] + v.size[1]);
+    lo[2] = Math.min(lo[2], v.at[2] - v.size[2] / 2); hi[2] = Math.max(hi[2], v.at[2] + v.size[2] / 2);
+  }
+  const span = Math.max(hi[0] - lo[0], hi[1], hi[2] - lo[2]);
+  view.target.set((lo[0] + hi[0]) / 2, hi[1] / 2, (lo[2] + hi[2]) / 2);
   view.dist = Math.max(span * 2.1 / Math.min(1, Math.max(camera.aspect, 0.45) * 1.4), 0.35);
   placeCamera();
-  state.counts = { break: 0, crumble: 0, debris_hit: 0, deform: 0 };
-  $("what").firstChild.textContent = b.label;
-  $("family").textContent = `${b.info.family}${b.info.yieldPa > 0 ? " · dents" : ""}${b.info.wobble > 0 ? " · wobbles" : ""}`;
-  $("log").textContent = " ";
+  const [kind, name] = state.target.split(":");
+  const first = [...onRange.values()][0];
+  $("what").firstChild.textContent = onRange.size > 1 ? (kind === "scene" ? SCENES[name].label : `${first.label} and ${onRange.size - 1} more`) : first.label;
+  $("family").textContent = onRange.size > 1 ? `${onRange.size} objects` :
+    `${first.info.family}${first.info.yieldPa > 0 ? " · dents" : ""}${first.info.wobble > 0 ? " · wobbles" : ""}`;
 }
 
 // ---------------------------------------------------------------- stepping
@@ -356,6 +459,8 @@ const waiters = [];  // rangeDrive: resolved when the next step answer arrives
 const perf = { frames: 0, render: 0, upload: 0, worst: 0, chunkMeshesDrawn: 0, fxBits: 0, fxPuffs: 0 };
 window.rangePerf = perf;
 window.rangeResetPerf = () => { for (const k of Object.keys(perf)) perf[k] = 0; sim.postMessage({ type: "resetPerf" }); };
+window.rangeLook = (yaw, pitch, dist) => { view.yaw = yaw; view.pitch = pitch; if (dist) view.dist = dist; placeCamera(); };  // testing
+window.rangeCounts = () => ({ pieces: chunks.size, bodies: bodies.size, objects: onRange.size, loose: state.loose });  // testing
 window.rangeThreads = (n) => sim.postMessage({ type: "setting", threads: n });  // profiling: engine threads (0 = none)
 window.rangeShootAt = (nx, ny) => {  // a tap at a fraction of the canvas (profiling)
   const r = renderer.domElement.getBoundingClientRect();
@@ -393,18 +498,147 @@ sim.onmessage = (e) => {
   }
 };
 
+// ---------------------------------------------------------------- sound: what breaking sounds like
+// Made on the spot from each event (no sound files): what broke (its material family), how heavy and how hard.
+//  - Hard materials ring at their vibration modes. A piece is treated as a free bar: its modes are at
+//    f_n = (beta_n L)^2 / (2 pi L^2) x sqrt(E I / (rho A)), beta_n L = 4.730, 7.853, 10.996, 14.137 (Euler-Bernoulli),
+//    so the partials stand at 1 : 2.76 : 5.40 : 8.93 and the pitch falls with size and rises with stiffness. Each
+//    rings down by its material's loss factor eta: a mode at f dies 60 dB in about 2.2 / (eta f) seconds (steel rings,
+//    wood knocks, concrete thuds). Moduli, densities and loss factors are typical engineering values.
+//  - Masonry and stone crack (a burst of noise in the 1-3 kHz band) over a low thump; glass adds a tinkle of high
+//    partials; soft things are a dull, muffled thud; a collapse is a long rumble.
+//  - Louder with energy (on a log scale, as hearing is), quieter with distance from the camera.
+const SOUND = {
+  metal: { E: 200e9, rho: 7800, eta: 0.0005 }, glass: { E: 70e9, rho: 2500, eta: 0.002 },
+  ceramic: { E: 100e9, rho: 2400, eta: 0.002 }, wood: { E: 11e9, rho: 600, eta: 0.01 },
+  plastic: { E: 2.5e9, rho: 1100, eta: 0.03 }, masonry: { E: 20e9, rho: 2200, eta: 0.03 },
+  stone: { E: 50e9, rho: 2600, eta: 0.01 }, ice: { E: 9e9, rho: 917, eta: 0.01 },
+};
+const BAR_MODES = [1, 2.756, 5.404, 8.933];
+let audio = null, noise = null, master = null, soundOn = true, soundsThisTick = 0, tickStart = 0, rendering = false;
+// Testing: renders one event's sound offline and says how loud it was and how long it rang (peak, seconds above -40 dB).
+window.rangeRenderSound = async (type, family, mass, energy) => {
+  const saved = [audio, master, noise];
+  audio = new OfflineAudioContext(1, 44100 * 2.5, 44100);
+  master = audio.createGain(); master.connect(audio.destination);
+  noise = audio.createBuffer(1, 44100, 44100);
+  const d = noise.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  rendering = true; tickStart = -1;
+  playSound(type, camera.position.x, camera.position.y, camera.position.z + 1, family, mass, energy);
+  rendering = false;
+  const buf = await audio.startRendering();
+  [audio, master, noise] = saved;
+  const x = buf.getChannelData(0);
+  let peak = 0, lastLoud = 0;
+  for (let i = 0; i < x.length; i++) peak = Math.max(peak, Math.abs(x[i]));
+  for (let i = 0; i < x.length; i++) if (Math.abs(x[i]) > peak * 0.01) lastLoud = i;
+  return { peak: +peak.toFixed(3), rings: +(lastLoud / 44100).toFixed(2) };
+};
+function startAudio() {
+  // Browsers only allow sound after a touch or click.
+  if (audio || !soundOn) { if (audio?.state === "suspended") audio.resume(); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  audio = new Ctx();
+  master = audio.createGain();
+  master.gain.value = 0.8;
+  master.connect(audio.destination);
+  noise = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+  const d = noise.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function envelope(node, peak, decay, at) {
+  node.gain.setValueAtTime(0.0001, at);
+  node.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), at + 0.003);
+  node.gain.exponentialRampToValueAtTime(0.0001, at + 0.003 + decay);
+}
+function noiseBurst(at, gain, freq, q, decay, type = "bandpass") {
+  const src = audio.createBufferSource();
+  src.buffer = noise;
+  src.playbackRate.value = 0.8 + Math.random() * 0.4;
+  const filter = audio.createBiquadFilter();
+  filter.type = type; filter.frequency.value = freq; filter.Q.value = q;
+  const g = audio.createGain();
+  envelope(g, gain, decay, at);
+  src.connect(filter).connect(g).connect(master);
+  src.start(at, Math.random() * 0.5, decay + 0.05);
+}
+function ring(at, gain, f1, eta) {
+  BAR_MODES.forEach((ratio, k) => {
+    const f = f1 * ratio;
+    if (f > 12000) return;
+    const osc = audio.createOscillator();
+    osc.frequency.value = f * (0.99 + 0.02 * Math.random());
+    const g = audio.createGain();
+    envelope(g, gain / (k + 1), Math.min(Math.max(2.2 / (eta * f), 0.03), 2.0), at);
+    osc.connect(g).connect(master);
+    osc.start(at);
+    osc.stop(at + 2.2);
+  });
+}
+function playSound(type, x, y, z, family, mass, energy) {
+  if (!audio || !soundOn || (audio.state !== "running" && !rendering)) return;
+  const now = audio.currentTime;
+  // At most a dozen sounds a tenth of a second (a big break reports dozens of crumbles at once).
+  if (now - tickStart > 0.1) { tickStart = now; soundsThisTick = 0; }
+  if (++soundsThisTick > 12) return;
+  const dist = camera.position.distanceTo(new THREE.Vector3(x, y, z));
+  const loud = Math.min(Math.max(Math.log10(Math.max(energy, 1)) / 6, 0.05), 1) / Math.max(1, dist / 3);
+  const gain = 0.35 * loud * (type === "crumble" || type === "debris_hit" ? 0.5 : 1);
+  if (gain < 0.003) return;
+  const at = now + 0.01 + Math.random() * 0.02;
+  // (Low sounds carry little of white noise's energy through their filter, so they are turned up to match.)
+  if (type === "collapsed") return noiseBurst(at, gain * 5, 120, 0.7, 1.6, "lowpass");
+  const m = SOUND[family];
+  if (!m) {  // soft, rubber, paper, earth, organic: a muffled thud
+    noiseBurst(at, gain * (family === "paper" ? 1.5 : 3), family === "paper" ? 900 : 220, 0.8, 0.12, "lowpass");
+    return;
+  }
+  // The piece as a free bar, from its mass: length about 1.5 and thickness about 0.5 of its size.
+  const size = Math.cbrt(Math.max(mass, 0.001) / m.rho), L = 1.5 * size, h = 0.5 * size;
+  const f1 = Math.min(Math.max((4.730 * 4.730 / (2 * Math.PI * L * L)) * h * Math.sqrt(m.E / (12 * m.rho)), 120), 5000);
+  if (family === "masonry" || family === "stone") {
+    noiseBurst(at, gain, 1500 + 1000 * Math.random(), 1.2, 0.06);        // the crack
+    noiseBurst(at, gain * 0.8, 140, 0.7, 0.18, "lowpass");               // the thump
+    if (type === "break") ring(at, gain * 0.2, f1, m.eta);
+    return;
+  }
+  noiseBurst(at, gain * 0.5, Math.min(f1 * 2, 8000), 1.5, 0.02);         // the strike
+  ring(at, gain, f1, m.eta);
+  if (family === "glass" && type !== "deform")                             // the tinkle of shards
+    for (let k = 0; k < 5; k++) ring(at + 0.03 + 0.12 * Math.random(), gain * 0.25, 2500 + 4000 * Math.random(), m.eta);
+}
+
 // ---------------------------------------------------------------- effects: what breaking things throws off
-// The engine says what, where, which way and how much (15 numbers each, from the worker); this draws it cheaply:
-// grit, splinters, shards and sparks as points that fly, fall and bounce once; dust as soft puffs that grow and fade.
+// The engine says what, where, which way and how much (15 numbers each, from the worker); this moves it through the
+// air the way real debris and dust move (docs/PHYSICS.md, "Dust and debris"):
+//  - chips, splinters, shards and sparks are small solids with air drag D = Cd rho V^2 A / 2 (NASA Glenn, "The Drag
+//    Equation"): a = -k |v| v with k = 3 rho_air Cd / (4 rho d) for a piece of size d, so each falls at its own
+//    terminal velocity V = sqrt(2 W / (Cd rho A)) (NASA Glenn, "Terminal Velocity"): a 5 mm chip at about 10 m/s, a
+//    half-millimetre steel spark at about 8 m/s. Sparks are hot steel and cool from white through orange to dark red.
+//  - dust is a turbulent puff: it slows as it takes in air (a momentum puff travels as t^(1/4), so its speed falls as
+//    t^(-3/4): Richards 1965), grows by turbulent mixing, drifts with small eddies, sinks at its grains' settling
+//    speed (Stokes: v = rho g d^2 / (18 mu), a few cm/s for 10-50 micrometre dust), and spreads along the ground
+//    when it reaches it instead of vanishing. Thinning as it grows, it fades.
 const FX = { DUST: 0, GRIT: 1, SPARKS: 2, SPLINTERS: 3, SHARDS: 4 };
 const FX_MAX = PHONE ? 700 : 1800, PUFF_MAX = PHONE ? 50 : 120;
+const AIR = { rho: 1.2, mu: 1.81e-5, g: 9.81 };  // sea-level air: density kg/m^3, viscosity Pa s
+// Per kind: grain density (kg/m^3), drag coefficient, size range (as a share of the effect's size) and bounce.
+const BIT = {
+  [FX.GRIT]: { rho: 2000, cd: 1.0, lo: 0.3, hi: 1.0, bounce: 0.3 },       // angular rock: Cd about 1
+  [FX.SPLINTERS]: { rho: 600, cd: 1.2, lo: 0.2, hi: 0.6, bounce: 0.25 },  // thin sticks broadside
+  [FX.SHARDS]: { rho: 2500, cd: 1.17, lo: 0.3, hi: 1.0, bounce: 0.2 },    // tumbling plates: a flat plate's Cd
+  [FX.SPARKS]: { rho: 7800, cd: 0.47, lo: 1, hi: 1, bounce: 0.1 },        // molten steel beads: a sphere's Cd
+};
 const bits = {
   pos: new Float32Array(FX_MAX * 3), vel: new Float32Array(FX_MAX * 3), col: new Float32Array(FX_MAX * 3),
-  base: new Float32Array(FX_MAX * 3), life: new Float32Array(FX_MAX), age: new Float32Array(FX_MAX), grav: new Float32Array(FX_MAX), n: 0,
+  base: new Float32Array(FX_MAX * 3), life: new Float32Array(FX_MAX), age: new Float32Array(FX_MAX),
+  drag: new Float32Array(FX_MAX), bounce: new Float32Array(FX_MAX), spark: new Uint8Array(FX_MAX), n: 0,
 };
 let bitsGeo = null, bitsMesh = null;
 const puffs = [], puffPool = [];
-let puffTexture = null;
+let puffTexture = null, fxClock = 0;
 function setupEffects() {
   bitsGeo = new THREE.BufferGeometry();
   bitsGeo.setAttribute("position", new THREE.BufferAttribute(bits.pos, 3).setUsage(THREE.DynamicDrawUsage));
@@ -428,7 +662,7 @@ function readEffects(fx) {
     const spread = fx[p + 8], size = fx[p + 9], speed = fx[p + 10], life = fx[p + 11];
     const color = [fx[p + 12], fx[p + 13], fx[p + 14]];
     if (kind === FX.DUST) for (let k = 0; k < Math.min(count, 14); k++) spawnPuff(at, dir, spread, size, speed, life, color);
-    else for (let k = 0; k < Math.min(count, 70); k++) spawnBit(kind, at, dir, spread, speed, life, color);
+    else for (let k = 0; k < Math.min(count, 70); k++) spawnBit(kind, at, dir, spread, size, speed, life, color);
   }
 }
 function coneDir(dir, spread) {
@@ -439,49 +673,86 @@ function coneDir(dir, spread) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
 }
-function spawnBit(kind, at, dir, spread, speed, life, color) {
+function spawnBit(kind, at, dir, spread, size, speed, life, color) {
   if (bits.n >= FX_MAX) return;
+  const spec = BIT[kind] || BIT[FX.GRIT];
   const i = bits.n++, d = coneDir(dir, spread), s = speed * (0.4 + Math.random() * 0.9);
   bits.pos.set(at, i * 3);
   bits.vel.set([d[0] * s, d[1] * s, d[2] * s], i * 3);
-  const glow = kind === FX.SPARKS ? 1.6 : kind === FX.SHARDS ? 1.25 : 1;
+  // Its size, and from it its drag: k = 3 rho_air Cd / (4 rho d).
+  const grain = kind === FX.SPARKS ? 0.0002 + 0.0005 * Math.random()
+    : Math.min(Math.max(size * (spec.lo + (spec.hi - spec.lo) * Math.random()), 0.001), 0.03);
+  bits.drag[i] = 3 * AIR.rho * spec.cd / (4 * spec.rho * grain);
+  bits.bounce[i] = spec.bounce;
+  bits.spark[i] = kind === FX.SPARKS ? 1 : 0;
+  const glow = kind === FX.SHARDS ? 1.25 : 1;
   const tone = 0.8 + Math.random() * 0.4;
   bits.base.set([Math.min(color[0] * glow * tone, 1), Math.min(color[1] * glow * tone, 1), Math.min(color[2] * glow * tone, 1)], i * 3);
   bits.col.set(bits.base.subarray(i * 3, i * 3 + 3), i * 3);
   bits.life[i] = life * (0.6 + Math.random() * 0.6);
   bits.age[i] = 0;
-  bits.grav[i] = kind === FX.SPARKS ? 0.4 : 1;
 }
 function spawnPuff(at, dir, spread, size, speed, life, color) {
   if (puffs.length >= PUFF_MAX) return;
   const sp = puffPool.pop() || new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTexture, transparent: true, depthWrite: false }));
   sp.material.color.setRGB(color[0], color[1], color[2]);
   const d = coneDir(dir, spread), s = speed * (0.3 + Math.random() * 0.7);
-  const jitter = size * 0.6;
+  const jitter = size * 0.6, r0 = Math.max(size * 0.5, 0.02);
   sp.position.set(at[0] + (Math.random() - 0.5) * jitter, at[1] + (Math.random() - 0.5) * jitter, at[2] + (Math.random() - 0.5) * jitter);
   scene.add(sp);
-  puffs.push({ sp, v: [d[0] * s, d[1] * s + 0.15, d[2] * s], size, age: 0, life: life * (0.7 + Math.random() * 0.6) });
+  // Grains 10 to 50 micrometres (concrete and plaster dust): Stokes settling speed rho g d^2 / (18 mu), 2400 kg/m^3.
+  const grain = 1e-5 + 4e-5 * Math.random();
+  puffs.push({
+    sp, v0: [d[0] * s, d[1] * s, d[2] * s], r0, t0: r0 / Math.max(s, 0.05), age: 0,
+    settle: 2400 * AIR.g * grain * grain / (18 * AIR.mu),
+    spreadV: [0, 0], from: [at[0], at[2]], phase: Math.random() * 6.28,
+    life: life * (1.2 + Math.random() * 0.8),  // fine dust hangs in the air
+  });
 }
+// Small eddies: a gentle swirling flow (a few cm/s), the same everywhere at a given moment.
+function eddy(x, y, z, t, out) {
+  const a = 0.08;
+  out[0] = a * Math.sin(1.3 * y + 0.7 * t) + 0.5 * a * Math.sin(0.8 * z - 0.4 * t);
+  out[1] = 0.4 * a * Math.sin(0.9 * x + 0.6 * t);
+  out[2] = a * Math.cos(1.1 * x + 0.5 * t) + 0.5 * a * Math.cos(0.7 * y + 0.3 * t);
+  return out;
+}
+const eddyVel = [0, 0, 0];
 function updateEffects(dt) {
   if (!bitsGeo) return;
+  fxClock += dt;
   for (let i = bits.n - 1; i >= 0; i--) {
     bits.age[i] += dt;
     if (bits.age[i] >= bits.life[i]) {
       // Swap the last one in.
       const last = --bits.n;
       for (const a of [bits.pos, bits.vel, bits.col, bits.base]) a.copyWithin(i * 3, last * 3, last * 3 + 3);
-      bits.life[i] = bits.life[last]; bits.age[i] = bits.age[last]; bits.grav[i] = bits.grav[last];
+      bits.life[i] = bits.life[last]; bits.age[i] = bits.age[last]; bits.drag[i] = bits.drag[last];
+      bits.bounce[i] = bits.bounce[last]; bits.spark[i] = bits.spark[last];
       continue;
     }
     const k = i * 3;
-    bits.vel[k + 1] -= 9.81 * bits.grav[i] * dt;
-    const drag = 1 - 0.6 * dt;
-    bits.vel[k] *= drag; bits.vel[k + 1] *= drag; bits.vel[k + 2] *= drag;
+    // Gravity, then quadratic air drag (solved implicitly, so it can never reverse the motion).
+    bits.vel[k + 1] -= AIR.g * dt;
+    const speed = Math.hypot(bits.vel[k], bits.vel[k + 1], bits.vel[k + 2]);
+    const keep = 1 / (1 + bits.drag[i] * speed * dt);
+    bits.vel[k] *= keep; bits.vel[k + 1] *= keep; bits.vel[k + 2] *= keep;
     bits.pos[k] += bits.vel[k] * dt; bits.pos[k + 1] += bits.vel[k + 1] * dt; bits.pos[k + 2] += bits.vel[k + 2] * dt;
-    if (bits.pos[k + 1] < 0.01) { bits.pos[k + 1] = 0.01; bits.vel[k + 1] *= -0.25; bits.vel[k] *= 0.5; bits.vel[k + 2] *= 0.5; }
-    // Fade toward the end of their life (sparks cool from yellow to dark red).
-    const f = 1 - Math.max(0, (bits.age[i] / bits.life[i] - 0.6) / 0.4);
-    bits.col[k] = bits.base[k] * f; bits.col[k + 1] = bits.base[k + 1] * f * f; bits.col[k + 2] = bits.base[k + 2] * f * f;
+    if (bits.pos[k + 1] < 0.01) {
+      bits.pos[k + 1] = 0.01;
+      bits.vel[k + 1] *= -bits.bounce[i];
+      bits.vel[k] *= 0.5; bits.vel[k + 2] *= 0.5;  // sliding friction on the bounce
+    }
+    const t = bits.age[i] / bits.life[i];
+    if (bits.spark[i]) {
+      // Cooling: white-hot, then yellow, orange and dull red, then too cool to see (below about 800 K).
+      const heat = Math.exp(-3 * t);
+      bits.col[k] = Math.min(1, 1.6 * heat + 0.2); bits.col[k + 1] = Math.min(1, 1.3 * heat * heat); bits.col[k + 2] = Math.min(1, heat * heat * heat);
+      if (heat < 0.15) { const f = heat / 0.15; bits.col[k] *= f; bits.col[k + 1] *= f; bits.col[k + 2] *= f; }
+    } else {
+      const f = 1 - Math.max(0, (t - 0.7) / 0.3);  // fade at the end
+      bits.col[k] = bits.base[k] * f; bits.col[k + 1] = bits.base[k + 1] * f; bits.col[k + 2] = bits.base[k + 2] * f;
+    }
   }
   bitsGeo.setDrawRange(0, bits.n);
   perf.fxBits = bits.n; perf.fxPuffs = puffs.length;
@@ -492,11 +763,36 @@ function updateEffects(dt) {
     p.age += dt;
     const t = p.age / p.life;
     if (t >= 1) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
-    const drag = 1 - 2.5 * dt;
-    p.v[0] *= drag; p.v[1] = p.v[1] * drag + 0.05 * dt; p.v[2] *= drag;
-    p.sp.position.x += p.v[0] * dt; p.sp.position.y += p.v[1] * dt; p.sp.position.z += p.v[2] * dt;
-    p.sp.scale.setScalar(p.size * (1 + 2.5 * t));
-    p.sp.material.opacity = 0.45 * (1 - t) * Math.min(1, p.age * 8);
+    // The puff's own motion dies away as it takes in air (speed ~ t^-3/4), it drifts on the eddies and sinks at its
+    // grains' settling speed; once it reaches the ground its downward push turns into spreading out along it.
+    const slow = Math.pow(1 + p.age / p.t0, -0.75);
+    const pos = p.sp.position;
+    eddy(pos.x, pos.y, pos.z, fxClock + p.phase, eddyVel);
+    let vx = p.v0[0] * slow + eddyVel[0] + p.spreadV[0];
+    let vy = p.v0[1] * slow + eddyVel[1] - p.settle;
+    let vz = p.v0[2] * slow + eddyVel[2] + p.spreadV[1];
+    // Grows: the puff's own mixing (radius ~ t^1/4) and the eddies' (sqrt(2 K t), K about 0.03 m^2/s).
+    const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * 0.03 * p.age);
+    const floor = 0.35 * r;
+    if (pos.y + vy * dt < floor) {
+      if (vy < 0) {
+        // Along the ground, away from where it came from (a dust cloud rolling out from a collapse).
+        let ax = pos.x - p.from[0], az = pos.z - p.from[1];
+        const al = Math.hypot(ax, az) || 1;
+        if (al < 1e-3) { ax = Math.cos(p.phase); az = Math.sin(p.phase); }
+        p.spreadV[0] += (ax / al) * -vy * 0.6; p.spreadV[1] += (az / al) * -vy * 0.6;
+        p.v0[1] = Math.max(p.v0[1], 0);
+      }
+      vy = Math.max(vy, (floor - pos.y) / Math.max(dt, 1e-3));
+    }
+    p.spreadV[0] *= 1 - Math.min(1, 1.5 * dt); p.spreadV[1] *= 1 - Math.min(1, 1.5 * dt);  // ground friction
+    pos.x += vx * dt; pos.y += vy * dt; pos.z += vz * dt;
+    p.sp.scale.setScalar(2 * r);
+    // How much light gets through (Beer-Lambert: 1 - e^-tau). A fresh cloud is thick (tau about 12); as it spreads its
+    // optical depth falls with concentration x depth, ~ (r0 / r)^2, so it stays dense a while and then thins out.
+    // It fades in fast and out over the last of its life as the dust settles.
+    const tau = 12 * Math.pow(p.r0 / r, 2);
+    p.sp.material.opacity = 0.55 * (1 - Math.exp(-tau)) * Math.min(1, p.age * 8) * Math.min(1, (1 - t) / 0.3);
   }
 }
 function clearEffects() {
@@ -540,7 +836,7 @@ function frame(now, driven) {
 function updateStats() {
   const c = state.counts;
   $("stats").textContent = `${chunks.size} pieces · ${state.loose} loose · ${fps.toFixed(0)} fps · ` +
-    `${c.break || 0} breaks · ${c.crumble || 0} crumbles · ${c.deform || 0} ${state.info && state.info.yieldPa > 0 ? "dents" : "chips"}${state.slow ? " · slow motion" : ""}`;
+    `${c.break || 0} breaks · ${c.crumble || 0} crumbles · ${c.deform || 0} ${[...onRange.values()].some((v) => v.info.yieldPa > 0) ? "dents" : "chips"}${state.slow ? " · slow motion" : ""}`;
 }
 
 // ---------------------------------------------------------------- hitting things
@@ -556,7 +852,7 @@ function shoot(clientX, clientY) {
   // The impactor arrives along the line of sight. A blast goes off a little in front of the surface.
   const back = imp.kind === "blast" ? 0.6 * Math.max(state.scale, 0.3) : 0;
   const p = hit.point.clone().addScaledVector(d, -back);
-  sim.postMessage({ type: "strike", imp: state.impact, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
+  sim.postMessage({ type: "strike", imp: state.impact, o: hit.object.userData.o, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
 }
 
 // ---------------------------------------------------------------- throwing and swinging
@@ -690,6 +986,7 @@ const pointers = new Map();
 let gesture = null;
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 canvas.addEventListener("pointerdown", (e) => {
+  startAudio();
   if (!$("settings").hidden) { closeSettings(); return; }  // a tap on the scene just closes the menu
   try { canvas.setPointerCapture(e.pointerId); } catch { /* some browsers refuse capture; taps still work */ }
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -793,18 +1090,55 @@ function buildControls(m) {
     o.value = `material:${name}`; o.textContent = name.replace(/_/g, " ");
     mats.appendChild(o);
   }
-  sel.append(mats, objects);
+  const scenes = document.createElement("optgroup");
+  scenes.label = "Scenes (several objects)";
+  for (const [name, sc] of Object.entries(SCENES)) {
+    const o = document.createElement("option");
+    o.value = `scene:${name}`; o.textContent = sc.label;
+    scenes.appendChild(o);
+  }
+  sel.append(scenes, mats, objects);
   sel.value = state.target;
   sel.addEventListener("change", () => { state.target = sel.value; build(); });
-  $("blast").addEventListener("click", () => sim.postMessage({ type: "blast", imp: state.impact }));
+  // "+": the same list of objects and materials; picking one puts another beside what is there.
+  const add = $("add");
+  const prompt = document.createElement("option");
+  prompt.value = ""; prompt.textContent = "Add another object";
+  add.append(prompt, objects.cloneNode(true), mats.cloneNode(true));
+  add.value = "";
+  add.addEventListener("change", () => {
+    if (!add.value) return;
+    sim.postMessage({ type: "add", item: { target: add.value }, seed: state.seed });
+    add.value = "";
+  });
+  $("blast").addEventListener("click", () => {
+    // In front of everything on the range, at half its height.
+    let x = 0, top = 0, front = -Infinity;
+    for (const v of onRange.values()) { x += v.at[0]; top = Math.max(top, v.at[1] + v.size[1]); front = Math.max(front, v.at[2] + v.size[2] / 2); }
+    x /= Math.max(onRange.size, 1);
+    sim.postMessage({ type: "blast", imp: state.impact, p: [x, top * 0.5, front + Math.max(0.6, top * 0.6)] });
+  });
   const toggle = (id, on) => { $(id).setAttribute("aria-pressed", String(on)); $(id).textContent = on ? "On" : "Off"; };
   $("soft").addEventListener("click", () => {
     state.soft = !state.soft;
     toggle("soft", state.soft);
     sim.postMessage({ type: "setting", soft: state.soft });
   });
+  $("sound").addEventListener("click", () => {
+    soundOn = !soundOn;
+    toggle("sound", soundOn);
+    if (audio) soundOn ? audio.resume() : audio.suspend();
+    else startAudio();
+  });
   $("slow").addEventListener("click", () => { state.slow = !state.slow; toggle("slow", state.slow); updateStats(); });
   $("reset").addEventListener("click", () => { state.seed++; build(); closeSettings(); });
+  // Put it back: everything on the range as it first stood, added objects too.
+  $("reset-now").addEventListener("click", () => {
+    const items = [...onRange.values()].map((v) => v.item);
+    if (!items.length) return build();
+    sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
+  });
+  $("lines").addEventListener("click", () => { state.breakLines = !state.breakLines; toggle("lines", state.breakLines); retintAll(); refreshMaterials(); });
   $("budget").value = String(state.budget);
   $("budget").addEventListener("change", () => {
     state.budget = Number($("budget").value);

@@ -20,11 +20,15 @@ const POOL = Math.min(4, Math.max(1, (self.navigator.hardwareConcurrency || 2) -
 let M, world, phys, queue, threads = 0;
 let PHONE = false, HULL_POINTS = 64, COMMAND_BUDGET_MS = 8;
 const L = {};
-const state = { object: 0, info: null, size: [5, 3, 0.6], scale: 1, budget: 1, soft: false, detail: 1 };
+const state = { budget: 1, soft: false, detail: 1, scale: 1 };
+// Every object on the range: object id -> { info (its material), label, size, at (where its own origin stands) }.
+const objects = new Map();
+// Chunk and body ids are each object's own, so the maps below key them by object too.
+const key = (o, id) => o * 4294967296 + id;
 const IMPACTS = [], MATERIALS = new Map(), PRESETS = new Map();
-const bodies = new Map();      // body id -> { rb, static, reactive, particle, fresh }
-const chunks = new Map();      // chunk id -> { collider, body, points, mass, sphere, box }
-const byCollider = new Map();  // collider handle -> body id
+const bodies = new Map();      // key(object, body) -> { rb, object, id, static, reactive, particle, fresh }
+const chunks = new Map();      // key(object, chunk) -> { collider, body (its key), points, mass, ... }
+const byCollider = new Map();  // collider handle -> body key
 const perf = { steps: 0, physics: 0, engine: 0, commands: 0, geometry: 0, colliders: 0, chunkMeshes: 0, worstStep: 0, hit: 0 };
 
 // ---------------------------------------------------------------- the engine's memory
@@ -166,21 +170,21 @@ function materialInfo(object) {
 // ---------------------------------------------------------------- chunks and colliders
 // A chunk's finished vertex buffer (position, normal, uv and a tag per vertex: destruct_chunk_render_mesh) goes to the
 // page as is; the collider points and bounds stay here.
-function chunkGeometry(c) {
+function chunkGeometry(o, c) {
   const g0 = performance.now();
   perf.chunkMeshes++;
   const info = M._malloc(32);
-  M._destruct_chunk_get_info(world, state.object, c, info);
+  M._destruct_chunk_get_info(world, o, c, info);
   views();
   const mass = f32(info);
   M._free(info);
-  const count = M._destruct_chunk_render_mesh(world, state.object, c, 0, 0);
+  const count = M._destruct_chunk_render_mesh(world, o, c, 0, 0);
   const buf = scratchFloats(count * 9);
-  M._destruct_chunk_render_mesh(world, state.object, c, buf, count);
+  M._destruct_chunk_render_mesh(world, o, c, buf, count);
   views();
   const verts = H.f32.slice(buf >> 2, (buf >> 2) + count * 9);
   const pts = scratchFloats(HULL_POINTS * 3);
-  const np = M._destruct_chunk_hull_points(world, state.object, c, pts, HULL_POINTS);
+  const np = M._destruct_chunk_hull_points(world, o, c, pts, HULL_POINTS);
   views();
   const points = H.f32.slice(pts >> 2, (pts >> 2) + np * 3);
   // Bounds, for the cheap colliders (the same as three.js would compute: box centre, farthest vertex).
@@ -210,7 +214,8 @@ function makeCollider(entry, body) {
     const s = entry.size;
     desc = RAPIER.ColliderDesc.cuboid(Math.max(s[0] / 2, 0.002), Math.max(s[1] / 2, 0.002), Math.max(s[2] / 2, 0.002)).setTranslation(cx, cy, cz);
   }
-  desc.setMass(Math.max(entry.mass, 0.001)).setFriction(state.info.friction).setRestitution(state.info.bounce)
+  const info = objects.get(body.object).info;
+  desc.setMass(Math.max(entry.mass, 0.001)).setFriction(info.friction).setRestitution(info.bounce)
     .setCollisionGroups(body.fresh ? FRESH_GROUPS : SOLID_GROUPS);
   if (!body.static && body.reactive && !body.particle) {
     desc.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(5);
@@ -260,14 +265,15 @@ function runCommands() {
     if (i >= 16 && performance.now() - start > COMMAND_BUDGET_MS) break;
     views();
     const p = base + i * L.cmd;
-    const type = i32(p + L.type), c = u32(p + L.chunk), body = u64(p + L.body);
+    const type = i32(p + L.type), o = u32(p + L.object), chunk = u32(p + L.chunk), id = u64(p + L.body);
+    const c = key(o, chunk), body = key(o, id);
     switch (type) {
       case 0: {  // ChunkAdded
-        const g = chunkGeometry(c);
+        const g = chunkGeometry(o, chunk);
         const e = { collider: null, body: 0 };
         keepGeometry(e, g);
         chunks.set(c, e);
-        out.ops.push({ op: "add", c, verts: g.verts });
+        out.ops.push({ op: "add", c, o, verts: g.verts });
         out.transfer.push(g.verts.buffer);
         break;
       }
@@ -281,8 +287,9 @@ function runCommands() {
       }
       case 2: {  // CreateBody
         const isStatic = i32(p + L.isStatic) !== 0;
-        const like = bodies.get(u64(p + L.placeLike));
-        let t = { x: 0, y: 0, z: 0 }, q = { x: 0, y: 0, z: 0, w: 1 }, v = { x: 0, y: 0, z: 0 }, w = { x: 0, y: 0, z: 0 };
+        const like = bodies.get(key(o, u64(p + L.placeLike)));
+        const at = objects.get(o)?.at || [0, 0, 0];  // a new body not like another: where the object stands
+        let t = { x: at[0], y: at[1], z: at[2] }, q = { x: 0, y: 0, z: 0, w: 1 }, v = { x: 0, y: 0, z: 0 }, w = { x: 0, y: 0, z: 0 };
         if (like) {
           t = like.rb.translation(); q = like.rb.rotation();
           if (!like.static) { v = like.rb.linvel(); w = like.rb.angvel(); }
@@ -295,9 +302,9 @@ function runCommands() {
           rb.setLinvel({ x: v.x + f32(p + L.addLin), y: v.y + f32(p + L.addLin + 4), z: v.z + f32(p + L.addLin + 8) }, true);
           rb.setAngvel({ x: w.x + f32(p + L.addAng), y: w.y + f32(p + L.addAng + 4), z: w.z + f32(p + L.addAng + 8) }, true);
         }
-        bodies.set(body, { rb, static: isStatic, reactive: i32(p + L.reactive) !== 0, particle: i32(p + L.particle) !== 0,
+        bodies.set(body, { rb, object: o, id, static: isStatic, reactive: i32(p + L.reactive) !== 0, particle: i32(p + L.particle) !== 0,
           fresh: !isStatic && i32(p + L.flag) !== 0 });
-        out.ops.push({ op: "body", id: body, static: isStatic, pose: [t.x, t.y, t.z, q.x, q.y, q.z, q.w] });
+        out.ops.push({ op: "body", id: body, o, static: isStatic, pose: [t.x, t.y, t.z, q.x, q.y, q.z, q.w] });
         break;
       }
       case 3: {  // AttachChunk
@@ -314,7 +321,7 @@ function runCommands() {
         if (!b) break;
         phys.removeRigidBody(b.rb);
         bodies.delete(body);
-        M._destruct_web_forget_pose(state.object, body);
+        M._destruct_web_forget_pose(o, id);
         out.ops.push({ op: "unbody", id: body });
         break;
       }
@@ -329,11 +336,11 @@ function runCommands() {
       case 9: {  // DeformChunk: dented or bent, same body
         const e = chunks.get(c);
         if (!e) break;
-        const g = chunkGeometry(c);
+        const g = chunkGeometry(o, chunk);
         keepGeometry(e, g);
         const b = bodies.get(e.body);
         if (b) { dropCollider(e); e.collider = makeCollider(e, b); }
-        out.ops.push({ op: "deform", c, verts: g.verts });
+        out.ops.push({ op: "deform", c, o, verts: g.verts });
         out.transfer.push(g.verts.buffer);
         break;
       }
@@ -359,9 +366,12 @@ function readEvents() {
   for (let i = 0; i < n; i++) {
     const p = base + i * L.evt;
     const type = EVENT_NAMES[i32(p + L.evType)] || "event";
-    out.events.push([type, f32(p + L.evPos), f32(p + L.evPos + 4), f32(p + L.evPos + 8), f32(p + L.evIntensity)]);
+    const info = objects.get(u32(p + L.evObject))?.info;
+    // [type, x, y, z, intensity, family, mass kg, energy J]: the last three for sound.
+    out.events.push([type, f32(p + L.evPos), f32(p + L.evPos + 4), f32(p + L.evPos + 8), f32(p + L.evIntensity),
+      info?.family || "", f32(p + L.evMass), f32(p + L.evEnergy)]);
     if (type === "break") lines.push(`break: ${f32(p + L.evMass).toFixed(0)} kg in ${i32(p + L.evPieces)} pieces`);
-    if (type === "deform") lines.push(`${state.info.yieldPa > 0 ? "dent" : "chip"}: ${(f32(p + L.evDeform) * 100).toFixed(1)} cm`);
+    if (type === "deform") lines.push(`${info && info.yieldPa > 0 ? "dent" : "chip"}: ${(f32(p + L.evDeform) * 100).toFixed(1)} cm`);
     if (type === "collapsed") lines.push("collapsed");
   }
   if (lines.length) out.log = lines.slice(-2).join("  ·  ");
@@ -383,11 +393,13 @@ function readEffects() {
   }
 }
 
-// ---------------------------------------------------------------- building a target
+// ---------------------------------------------------------------- building the range
+// The range holds one or more objects: a scene (build) replaces them all, add puts one more beside them.
 function clearScene() {
   for (const b of bodies.values()) phys.removeRigidBody(b.rb);
   bodies.clear(); chunks.clear(); byCollider.clear();
-  if (state.object) M._destruct_remove_object(world, state.object);
+  for (const o of objects.keys()) M._destruct_remove_object(world, o);
+  objects.clear();
   M._destruct_take_commands(world);
   M._destruct_take_events(world);
   M._destruct_take_effects(world);
@@ -397,41 +409,89 @@ function clearScene() {
   out = fresh();
 }
 
+// The size an item comes in (a preset's own; a material as a wall, a panel or a sheet, or the size asked for).
+function itemSize(item) {
+  const [kind, name] = item.target.split(":");
+  if (item.size) return item.size;
+  if (kind === "object") return PRESETS.get(name).size;
+  const info = MATERIALS.get(name);
+  if (info.pane) return [3, 2, 0.04];
+  if (info.sheet) return [3, 2, name === "sheet_metal" ? 0.004 : name === "aluminum_foil" ? 0.001 : 0.04];
+  return [5, 3, 0.6];
+}
+
+// Makes one object, standing with its own origin (the middle of its base) at item.at.
+function makeObject(item, seed) {
+  const [kind, name] = item.target.split(":");
+  const size = itemSize(item);
+  let shell = -1, anchor = item.anchor ?? -1, preset = "", material = "";
+  if (kind === "object") preset = name;
+  else {
+    material = name;
+    const info = MATERIALS.get(name);
+    if (item.anchor === undefined && info.pane) anchor = 3;
+    else if (item.anchor === undefined && info.sheet) anchor = 2;
+  }
+  const custom = kind !== "object" || item.size;
+  const o = withString(name, (np) => withString(material, (mp) => withString(preset, (pp) =>
+    M._destruct_web_make(world, np, mp, pp, custom ? size[0] : 0, custom ? size[1] : 0, custom ? size[2] : 0, shell, anchor,
+      state.detail, seed))));
+  if (!o) return null;
+  const at = item.at || [0, 0, 0];
+  // Where it stands: the object itself (body 0) is placed there, and its first bodies start there.
+  const r = M._malloc(36);
+  views();
+  H.f32.set([1, 0, 0, 0, 1, 0, 0, 0, 1], r >> 2);
+  M._destruct_web_set_pose(o, 0, r, at[0], at[1], at[2]);
+  M._free(r);
+  const info = materialInfo(o);
+  // Phones: full crumbling, but fewer loose pieces at once and crumbs as particles sooner.
+  if (PHONE && state.detail > 0) M._destruct_object_set_debris_lod(world, o, 150, 0.0006);
+  const label = kind === "object" ? PRESETS.get(name).label : name.replace(/_/g, " ");
+  objects.set(o, { info, label, size, at, item: { ...item, at } });
+  return { o, info, label, size, at };
+}
+
+// Everything the page needs about the objects now on the range.
+function objectList() {
+  return [...objects].map(([o, v]) => ({ o, info: v.info, label: v.label, size: v.size, at: v.at, item: v.item }));
+}
+function rangeScale() {
+  let span = 0;
+  for (const v of objects.values()) span = Math.max(span, ...v.size);
+  return Math.min(1, span / 3);
+}
+
 function build(msg) {
   clearScene();
   state.detail = msg.detail; state.budget = msg.budget; state.soft = msg.soft;
-  const [kind, name] = msg.target.split(":");
-  let size = [5, 3, 0.6], shell = -1, anchor = -1, preset = "", material = "";
-  if (kind === "object") {
-    preset = name;
-    size = PRESETS.get(name).size;
-  } else {
-    material = name;
-    const info = MATERIALS.get(name);
-    if (info.pane) { size = [3, 2, 0.04]; anchor = 3; }
-    else if (info.sheet) { size = [3, 2, name === "sheet_metal" ? 0.004 : name === "aluminum_foil" ? 0.001 : 0.04]; anchor = 2; }
-  }
-  state.size = size;
-  state.object = withString(name, (np) => withString(material, (mp) => withString(preset, (pp) =>
-    M._destruct_web_make(world, np, mp, pp, kind === "object" ? 0 : size[0], kind === "object" ? 0 : size[1],
-      kind === "object" ? 0 : size[2], shell, anchor, state.detail, msg.seed))));
-  state.info = materialInfo(state.object);
   M._destruct_world_set_energy_budget(world, state.budget);
   M._destruct_world_set_soft_sim(world, state.soft ? 1 : 0);
-  // Phones: full crumbling, but fewer loose pieces at once and crumbs as particles sooner.
-  if (PHONE && state.detail > 0) M._destruct_object_set_debris_lod(world, state.object, 150, 0.0006);
-  state.scale = Math.min(1, Math.max(size[0], size[1], size[2]) / 3);
+  msg.items.forEach((item, i) => makeObject(item, msg.seed + i * 7919));
+  state.scale = rangeScale();
   runCommands();
-  flush({ built: { info: state.info, size, label: kind === "object" ? PRESETS.get(name).label : name.replace(/_/g, " "), scale: state.scale } });
+  flush({ built: { objects: objectList(), scale: state.scale, replaced: true } });
+}
+
+// One more object beside the others: to the right of whatever is there, a little apart.
+function addItem(msg) {
+  const size = itemSize(msg.item);
+  let right = -Infinity;
+  for (const v of objects.values()) right = Math.max(right, v.at[0] + v.size[0] / 2);
+  const x = objects.size ? right + 0.3 + size[0] / 2 : 0;
+  makeObject({ ...msg.item, at: [x, 0, 0] }, msg.seed + objects.size * 7919);
+  state.scale = rangeScale();
+  runCommands();
+  flush({ built: { objects: objectList(), scale: state.scale, replaced: false } });
 }
 
 // ---------------------------------------------------------------- stepping
 const rot = { p: 0 };
 function step(dt) {
   // Air drag (0.5 rho Cd A v^2), from each piece's mass and its material's density: dust slows fast, bricks hardly.
-  const density = Math.max(state.info?.density || 1000, 1);
   for (const b of bodies.values()) {
     if (b.static) continue;
+    const density = Math.max(objects.get(b.object)?.info.density || 1000, 1);
     const v = b.rb.linvel(), speed = Math.hypot(v.x, v.y, v.z);
     if (speed < 0.01) continue;
     const m = Math.max(b.rb.mass(), 1e-4), area = Math.pow(m / density, 2 / 3);
@@ -454,12 +514,12 @@ function step(dt) {
       const impulse = mag * dt, energy = (impulse * impulse) / (2 * Math.max(m, 0.01));
       if (energy < 20) continue;
       const t = b.rb.translation();
-      M._destruct_web_contact(world, state.object, id, t.x, t.y, t.z, energy);
+      M._destruct_web_contact(world, b.object, b.id, t.x, t.y, t.z, energy);
     }
   });
   // Tell the engine where every body is now (rotation row-major, from the quaternion), then step it.
   const r = rot.p || (rot.p = M._malloc(36));
-  for (const [id, b] of bodies) {
+  for (const b of bodies.values()) {
     if (b.posed && (b.static || b.rb.isSleeping())) continue;  // the engine still has where it lies
     const t = b.rb.translation(), q = b.rb.rotation();
     const { x, y, z, w } = q;
@@ -468,7 +528,7 @@ function step(dt) {
     F[a] = 1 - 2 * (y * y + z * z); F[a + 1] = 2 * (x * y - z * w); F[a + 2] = 2 * (x * z + y * w);
     F[a + 3] = 2 * (x * y + z * w); F[a + 4] = 1 - 2 * (x * x + z * z); F[a + 5] = 2 * (y * z - x * w);
     F[a + 6] = 2 * (x * z - y * w); F[a + 7] = 2 * (y * z + x * w); F[a + 8] = 1 - 2 * (x * x + y * y);
-    M._destruct_web_set_pose(state.object, id, r, t.x, t.y, t.z);
+    M._destruct_web_set_pose(b.object, b.id, r, t.x, t.y, t.z);
     b.posed = true;
   }
   t0 = performance.now();
@@ -485,8 +545,10 @@ function step(dt) {
 function strike(msg) {
   const h0 = performance.now();
   const imp = IMPACTS[msg.imp], [px, py, pz] = msg.p, [dx, dy, dz] = msg.d;
+  const target = objects.get(msg.o);
+  if (!target) return;
   const o = M._malloc(28);
-  withString(imp.name, (np) => M._destruct_web_strike(world, state.object, np, px, py, pz, dx, dy, dz, 1, o));
+  withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, 1, o));
   views();
   const pushed = f32(o + 24) !== 0;
   if (imp.kind === "pointed" || imp.kind === "edge") {
@@ -503,18 +565,19 @@ function strike(msg) {
   const happened = readEvents();
   if (!happened && imp.kind !== "pointed" && imp.kind !== "blast" && !pushed) {
     // Say so, rather than leave the player guessing.
-    out.log = `${imp.label} (${energyLabel(imp.energy)}): no damage. ${state.info.name.replace(/_/g, " ")} is tougher than that; keep hitting it to wear it down`;
+    out.log = `${imp.label} (${energyLabel(imp.energy)}): no damage. ${target.info.name.replace(/_/g, " ")} is tougher than that; keep hitting it to wear it down`;
   }
   perf.hit = performance.now() - h0;
 }
 function energyLabel(j) {
   return j >= 1e6 ? `${(j / 1e6).toFixed(1)} MJ` : j >= 1000 ? `${(j / 1000).toFixed(j >= 10000 ? 0 : 1)} kJ` : `${j.toFixed(0)} J`;
 }
+// A blast wave in front of the range (the page says where: the middle of everything, a little in front).
 function blast(msg) {
-  const s = state.size, d = Math.max(s[2], 0.1) / 2 + Math.max(0.6, Math.max(s[0], s[1]) * 0.6);
   const imp = IMPACTS[msg.imp].kind === "blast" ? IMPACTS[msg.imp] : IMPACTS.find((x) => x.name === "grenade");
-  M._destruct_web_detonate(world, 0, s[1] * 0.5, d, imp.energy, 6 * Math.max(state.scale, 0.2));
-  marker("break", 0, s[1] * 0.5, d, 1);
+  const [x, y, z] = msg.p;
+  M._destruct_web_detonate(world, x, y, z, imp.energy, 6 * Math.max(state.scale, 0.2));
+  marker("break", x, y, z, 1);
 }
 
 // ---------------------------------------------------------------- throwing and swinging
@@ -602,7 +665,8 @@ function strikeFrom(item, otherHandle, velocity) {
   item.cooldown.set(id, now + 150);
   const at = point || item.rb.translation();
   const o = M._malloc(28);
-  withString(item.imp.name, (np) => M._destruct_web_strike(world, state.object, np, at.x, at.y, at.z, rel[0] / speed, rel[1] / speed, rel[2] / speed,
+  if (!body) return;
+  withString(item.imp.name, (np) => M._destruct_web_strike(world, body.object, np, at.x, at.y, at.z, rel[0] / speed, rel[1] / speed, rel[2] / speed,
     closing / item.imp.speed, o));
   M._free(o);
   marker("debris_hit", at.x, at.y, at.z, 0.2);
@@ -640,6 +704,7 @@ function clearProjectiles() {
 const handlers = {
   init,
   build,
+  add: addItem,
   step(msg) {
     for (let i = 0; i < msg.n; i++) {
       const s0 = performance.now();
