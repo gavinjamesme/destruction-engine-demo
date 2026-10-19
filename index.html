@@ -294,8 +294,8 @@ function applyOps(ops) {
       case "retire": {
         const e = chunks.get(o.c);
         if (!e) break;
-        e.mesh.parent?.remove(e.mesh);
-        e.mesh.geometry.dispose();
+        if (o.fade && e.mesh.parent) fadeOut(e.mesh);  // tidied away: it settles into the ground
+        else { e.mesh.parent?.remove(e.mesh); e.mesh.geometry.dispose(); }
         chunks.delete(o.c);
         break;
       }
@@ -312,6 +312,7 @@ function applyOps(ops) {
         const e = chunks.get(o.c), b = bodies.get(o.id);
         if (!e || !b) break;
         e.body = o.id;
+        b.radius = undefined;  // its size changed
         b.group.add(e.mesh);
         e.mesh.castShadow = b.static || !PHONE;  // on phones only the standing structure casts shadows
         break;
@@ -338,6 +339,13 @@ function applyPoses(p) {
   for (let i = 0; i < p.length; i += 8) {
     const b = bodies.get(p[i]);
     if (!b) continue;
+    // How fast it is going (for the air it drags along: the dust's wakes).
+    const now = performance.now(), dtp = b.at ? (now - b.at) / 1000 : 0;
+    if (dtp > 0.004) {
+      const q = b.group.position;
+      b.vel = [(p[i + 1] - q.x) / dtp, (p[i + 2] - q.y) / dtp, (p[i + 3] - q.z) / dtp];
+    }
+    b.at = now;
     b.group.position.set(p[i + 1], p[i + 2], p[i + 3]);
     b.group.quaternion.set(p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
   }
@@ -456,7 +464,7 @@ let waiting = false, ready = false;
 const waiters = [];  // rangeDrive: resolved when the next step answer arrives
 // Where time goes (ms, summed; window.rangePerf for profiling). The worker's: physics, engine, commands (geometry and
 // colliders), its worst step. The page's: upload (meshes to the GPU), render, its worst frame.
-const perf = { frames: 0, render: 0, upload: 0, worst: 0, chunkMeshesDrawn: 0, fxBits: 0, fxPuffs: 0 };
+const perf = { frames: 0, render: 0, upload: 0, fx: 0, worst: 0, chunkMeshesDrawn: 0, fxBits: 0, fxPuffs: 0 };
 window.rangePerf = perf;
 window.rangeResetPerf = () => { for (const k of Object.keys(perf)) perf[k] = 0; sim.postMessage({ type: "resetPerf" }); };
 window.rangeLook = (yaw, pitch, dist) => { view.yaw = yaw; view.pitch = pitch; if (dist) view.dist = dist; placeCamera(); };  // testing
@@ -611,58 +619,171 @@ function playSound(type, x, y, z, family, mass, energy) {
 }
 
 // ---------------------------------------------------------------- effects: what breaking things throws off
-// The engine says what, where, which way and how much (15 numbers each, from the worker); this moves it through the
-// air the way real debris and dust move (docs/PHYSICS.md, "Dust and debris"):
-//  - chips, splinters, shards and sparks are small solids with air drag D = Cd rho V^2 A / 2 (NASA Glenn, "The Drag
-//    Equation"): a = -k |v| v with k = 3 rho_air Cd / (4 rho d) for a piece of size d, so each falls at its own
-//    terminal velocity V = sqrt(2 W / (Cd rho A)) (NASA Glenn, "Terminal Velocity"): a 5 mm chip at about 10 m/s, a
-//    half-millimetre steel spark at about 8 m/s. Sparks are hot steel and cool from white through orange to dark red.
-//  - dust is a turbulent puff: it slows as it takes in air (a momentum puff travels as t^(1/4), so its speed falls as
-//    t^(-3/4): Richards 1965), grows by turbulent mixing, drifts with small eddies, sinks at its grains' settling
-//    speed (Stokes: v = rho g d^2 / (18 mu), a few cm/s for 10-50 micrometre dust), and spreads along the ground
-//    when it reaches it instead of vanishing. Thinning as it grows, it fades.
+// The engine says what, where, which way and how much (16 numbers each, from the worker). How much comes from the
+// material that broke: the fines too small to be pieces of their own, a few percent of what crumbled (core
+// effects.cpp: the Gates-Gaudin-Schuhmann size spread). This moves it through the air the way real debris and dust
+// move (docs/PHYSICS.md, "Dust and debris"):
+//  - the air itself moves: breaks push it outward (a momentum puff, slowing as t^(-3/4): Richards 1965), flying pieces
+//    drag it along behind them, and it is full of eddies of every size, faster the bigger they are (Kolmogorov:
+//    u(l) ~ (eps l)^(1/3)), stirred up where something just broke. The eddies are the curl of a smooth field, so the
+//    flow neither piles up nor empties anywhere (divergence-free, like real air at these speeds).
+//  - grit, splinters, shards and sparks are small solids with air drag D = Cd rho V^2 A / 2 against the air around
+//    them (NASA Glenn, "The Drag Equation"): a = -k |v - u| (v - u) with k = 3 rho_air Cd / (4 rho d), so each falls
+//    at its own terminal velocity (NASA Glenn, "Terminal Velocity") and the finest get carried by gusts. Each is
+//    drawn at its real size, from a tenth of the effect's size up to it.
+//  - dust goes wherever the air goes (its grains settle at only a few cm/s: Stokes, v = rho g d^2 / (18 mu)). A puff
+//    is as thick as the dust in it: optical depth tau = Q A / (pi r^2), the grains' cross-section A = 1.5 m / (rho d)
+//    over the cloud's area (Beer-Lambert), so a pinch of dust is a faint wisp and a collapse a thick cloud, and each
+//    thins and fades as it spreads.
 const FX = { DUST: 0, GRIT: 1, SPARKS: 2, SPLINTERS: 3, SHARDS: 4 };
-const FX_MAX = PHONE ? 700 : 1800, PUFF_MAX = PHONE ? 50 : 120;
+const FX_MAX = PHONE ? 900 : 2500, PUFF_MAX = PHONE ? 60 : 160, PER_EFFECT = PHONE ? 160 : 400;
 const AIR = { rho: 1.2, mu: 1.81e-5, g: 9.81 };  // sea-level air: density kg/m^3, viscosity Pa s
-// Per kind: grain density (kg/m^3), drag coefficient, size range (as a share of the effect's size) and bounce.
+// Per kind: grain density (kg/m^3), drag coefficient and bounce.
 const BIT = {
-  [FX.GRIT]: { rho: 2000, cd: 1.0, lo: 0.3, hi: 1.0, bounce: 0.3 },       // angular rock: Cd about 1
-  [FX.SPLINTERS]: { rho: 600, cd: 1.2, lo: 0.2, hi: 0.6, bounce: 0.25 },  // thin sticks broadside
-  [FX.SHARDS]: { rho: 2500, cd: 1.17, lo: 0.3, hi: 1.0, bounce: 0.2 },    // tumbling plates: a flat plate's Cd
-  [FX.SPARKS]: { rho: 7800, cd: 0.47, lo: 1, hi: 1, bounce: 0.1 },        // molten steel beads: a sphere's Cd
+  [FX.GRIT]: { rho: 2000, cd: 1.0, bounce: 0.3 },        // angular rock: Cd about 1
+  [FX.SPLINTERS]: { rho: 600, cd: 1.2, bounce: 0.25 },   // thin sticks broadside
+  [FX.SHARDS]: { rho: 2500, cd: 1.17, bounce: 0.2 },     // tumbling plates: a flat plate's Cd
+  [FX.SPARKS]: { rho: 7800, cd: 0.47, bounce: 0.1 },     // molten steel beads: a sphere's Cd
 };
 const bits = {
   pos: new Float32Array(FX_MAX * 3), vel: new Float32Array(FX_MAX * 3), col: new Float32Array(FX_MAX * 3),
-  base: new Float32Array(FX_MAX * 3), life: new Float32Array(FX_MAX), age: new Float32Array(FX_MAX),
-  drag: new Float32Array(FX_MAX), bounce: new Float32Array(FX_MAX), spark: new Uint8Array(FX_MAX), n: 0,
+  base: new Float32Array(FX_MAX * 3), air: new Float32Array(FX_MAX * 3), size: new Float32Array(FX_MAX), alpha: new Float32Array(FX_MAX),
+  life: new Float32Array(FX_MAX), age: new Float32Array(FX_MAX), drag: new Float32Array(FX_MAX),
+  bounce: new Float32Array(FX_MAX), spark: new Uint8Array(FX_MAX), n: 0,
 };
 let bitsGeo = null, bitsMesh = null;
-const puffs = [], puffPool = [];
-let puffTexture = null, fxClock = 0;
+const puffs = [], puffPool = [], puffTextures = [];
+let fxClock = 0, fxFrame = 0;
+
+// Grains as points of their real size (never under a pixel and a half: smaller ones are drawn fainter instead, as
+// a grain covering part of a pixel would look).
+const bitsShader = {
+  uniforms: { scale: { value: 500 } },
+  vertexShader: `
+    attribute float size; attribute float alpha; attribute vec3 color;
+    uniform float scale; varying vec3 vColor; varying float vAlpha;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float px = size * scale / -mv.z;
+      gl_PointSize = clamp(px, 1.5, 24.0);
+      vAlpha = alpha * min(1.0, (px * px) / 2.25);
+      vColor = color;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      if (dot(d, d) > 0.25) discard;
+      gl_FragColor = vec4(vColor, vAlpha);
+    }`,
+};
 function setupEffects() {
   bitsGeo = new THREE.BufferGeometry();
-  bitsGeo.setAttribute("position", new THREE.BufferAttribute(bits.pos, 3).setUsage(THREE.DynamicDrawUsage));
-  bitsGeo.setAttribute("color", new THREE.BufferAttribute(bits.col, 3).setUsage(THREE.DynamicDrawUsage));
+  const attr = (a, n) => new THREE.BufferAttribute(a, n).setUsage(THREE.DynamicDrawUsage);
+  bitsGeo.setAttribute("position", attr(bits.pos, 3));
+  bitsGeo.setAttribute("color", attr(bits.col, 3));
+  bitsGeo.setAttribute("size", attr(bits.size, 1));
+  bitsGeo.setAttribute("alpha", attr(bits.alpha, 1));
   bitsGeo.setDrawRange(0, 0);
-  bitsMesh = new THREE.Points(bitsGeo, new THREE.PointsMaterial({ size: 0.035, vertexColors: true, sizeAttenuation: true }));
+  bitsMesh = new THREE.Points(bitsGeo, new THREE.ShaderMaterial({ ...bitsShader, transparent: true, depthWrite: false }));
   bitsMesh.frustumCulled = false;
   scene.add(bitsMesh);
-  // A soft round dot for dust puffs.
-  const c = document.createElement("canvas");
-  c.width = c.height = 64;
-  const g = c.getContext("2d"), grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, "rgba(255,255,255,1)"); grad.addColorStop(0.5, "rgba(255,255,255,0.45)"); grad.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
-  puffTexture = new THREE.CanvasTexture(c);
+  // Puffs: soft blobs with lumpy edges and uneven insides, a few of them so neighbouring puffs never match.
+  for (let v = 0; v < 4; v++) {
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    for (let k = 0; k < 9; k++) {
+      const a = Math.random() * 6.28, d = k === 0 ? 0 : 6 + Math.random() * 12, r = 14 + Math.random() * 12;
+      const x = 32 + Math.cos(a) * d, y = 32 + Math.sin(a) * d;
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, "rgba(255,255,255,0.5)"); grad.addColorStop(1, "rgba(255,255,255,0)");
+      g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+    }
+    puffTextures.push(new THREE.CanvasTexture(c));
+  }
 }
+function bitsScale() {
+  return renderer.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360));
+}
+
+// ---- The air
+// Gusts: where something broke, the air rushes outward (and the way the debris was thrown). A momentum puff: speed
+// U0 (1 + t/t0)^(-3/4), reach R0 (1 + t/t0)^(1/4).
+const gusts = [];
+function addGust(at, dir, speed, reach) {
+  if (gusts.length >= 24) gusts.shift();
+  gusts.push({ x: at[0], y: at[1], z: at[2], dir, u0: speed, r0: reach, t0: reach / Math.max(speed, 0.1), age: 0 });
+}
+// Wakes: the air around a flying piece moves with it (the fastest dozen pieces, from their poses).
+const wakes = [];
+// Eddies at three sizes (m), each a divergence-free swirl: the curl of A = (sin(ky + a) cos(kz + b), ...).
+const EDDIES = [{ l: 3.0, ph: 0.3 }, { l: 1.0, ph: 2.1 }, { l: 0.35, ph: 4.4 }];
+const AMBIENT_EPS = 2e-4;  // m^2/s^3: a still day outdoors (eddies of 1 m at about 6 cm/s)
+function airAt(x, y, z, out) {
+  out[0] = out[1] = out[2] = 0;
+  // How hard the air is being stirred here: the calm background, plus each gust's turbulence (dissipation U^3 / R).
+  let eps = AMBIENT_EPS;
+  for (const g of gusts) {
+    const s = 1 + g.age / g.t0, u = g.u0 * Math.pow(s, -0.75), r = g.r0 * Math.pow(s, 0.25);
+    const dx = x - g.x, dy = y - g.y, dz = z - g.z, d2 = dx * dx + dy * dy + dz * dz;
+    const w = Math.exp(-d2 / (r * r));
+    if (w < 1e-3) continue;
+    eps += (0.3 * u * u * u / r) * w;
+    const d = Math.sqrt(d2) || 1, push = u * w;
+    out[0] += push * (0.6 * dx / d + 0.4 * g.dir[0]);
+    out[1] += push * (0.6 * dy / d + 0.4 * g.dir[1]);
+    out[2] += push * (0.6 * dz / d + 0.4 * g.dir[2]);
+  }
+  for (const b of wakes) {
+    const dx = x - b.x, dy = y - b.y, dz = z - b.z;
+    const w = 0.6 * Math.exp(-(dx * dx + dy * dy + dz * dz) / (b.r * b.r));
+    out[0] += b.vx * w; out[1] += b.vy * w; out[2] += b.vz * w;
+  }
+  for (const e of EDDIES) {
+    const k = 6.283 / e.l, u = Math.cbrt(eps * e.l);  // Kolmogorov
+    const t = fxClock * u / e.l + e.ph;  // each eddy turns over in about l / u
+    const px = k * x + 0.7 * t, py = k * y + t, pz = k * z + 1.1 * t;
+    const sx = Math.sin(px), cx = Math.cos(px), sy = Math.sin(py), cy = Math.cos(py), sz = Math.sin(pz), cz = Math.cos(pz);
+    // The curl of A = (sy cz, sz cx, sx cy) over k, halved so each component peaks at u.
+    out[0] -= 0.5 * u * (sx * sy + cz * cx);
+    out[1] -= 0.5 * u * (sy * sz + cx * cy);
+    out[2] -= 0.5 * u * (sz * sx + cy * cz);
+  }
+  return out;
+}
+// The fastest moving pieces this frame, as wakes.
+function updateWakes() {
+  wakes.length = 0;
+  for (const b of bodies.values()) {
+    if (b.static || !b.vel) continue;
+    const s = Math.hypot(b.vel[0], b.vel[1], b.vel[2]);
+    if (s < 0.5) continue;
+    if (b.radius === undefined) {
+      const box = new THREE.Box3().setFromObject(b.group);
+      b.radius = box.isEmpty() ? 0.1 : 0.5 * box.getSize(new THREE.Vector3()).length();
+    }
+    wakes.push({ x: b.group.position.x, y: b.group.position.y, z: b.group.position.z, vx: b.vel[0], vy: b.vel[1], vz: b.vel[2], r: 1.5 * b.radius + 0.05, s });
+  }
+  if (wakes.length > 12) { wakes.sort((a, b) => b.s - a.s); wakes.length = 12; }
+}
+
 function readEffects(fx) {
-  for (let p = 0; p + 15 <= fx.length; p += 15) {
+  for (let p = 0; p + 16 <= fx.length; p += 16) {
     const kind = fx[p], count = fx[p + 1];
     const at = [fx[p + 2], fx[p + 3], fx[p + 4]], dir = [fx[p + 5], fx[p + 6], fx[p + 7]];
     const spread = fx[p + 8], size = fx[p + 9], speed = fx[p + 10], life = fx[p + 11];
-    const color = [fx[p + 12], fx[p + 13], fx[p + 14]];
-    if (kind === FX.DUST) for (let k = 0; k < Math.min(count, 14); k++) spawnPuff(at, dir, spread, size, speed, life, color);
-    else for (let k = 0; k < Math.min(count, 70); k++) spawnBit(kind, at, dir, spread, size, speed, life, color);
+    const color = [fx[p + 12], fx[p + 13], fx[p + 14]], mass = fx[p + 15];
+    if (kind === FX.DUST) {
+      // The air rushes out with the dust; then the dust goes where the air goes.
+      addGust(at, dir, Math.max(speed, 0.5), Math.max(size, 0.1));
+      for (let k = 0; k < Math.min(count, 6); k++) spawnPuff(at, dir, spread, size, speed, mass / count, color);
+    } else {
+      // Grains come off the whole broken region, not one point.
+      const reach = Math.min(Math.max(size * 6, 0.01), 0.15);
+      for (let k = 0; k < Math.min(count, PER_EFFECT); k++) spawnBit(kind, at, reach, dir, spread, size, speed, life, color);
+    }
   }
 }
 function coneDir(dir, spread) {
@@ -673,15 +794,15 @@ function coneDir(dir, spread) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
 }
-function spawnBit(kind, at, dir, spread, size, speed, life, color) {
+function spawnBit(kind, at, reach, dir, spread, size, speed, life, color) {
   if (bits.n >= FX_MAX) return;
   const spec = BIT[kind] || BIT[FX.GRIT];
   const i = bits.n++, d = coneDir(dir, spread), s = speed * (0.4 + Math.random() * 0.9);
-  bits.pos.set(at, i * 3);
+  bits.pos.set([at[0] + (Math.random() - 0.5) * reach, at[1] + (Math.random() - 0.5) * reach, at[2] + (Math.random() - 0.5) * reach], i * 3);
   bits.vel.set([d[0] * s, d[1] * s, d[2] * s], i * 3);
-  // Its size, and from it its drag: k = 3 rho_air Cd / (4 rho d).
-  const grain = kind === FX.SPARKS ? 0.0002 + 0.0005 * Math.random()
-    : Math.min(Math.max(size * (spec.lo + (spec.hi - spec.lo) * Math.random()), 0.001), 0.03);
+  // Its size (a tenth of the effect's size up to it, spread evenly), and from it its drag: k = 3 rho_air Cd / (4 rho d).
+  const grain = kind === FX.SPARKS ? 0.0002 + 0.0005 * Math.random() : Math.max(size * (0.1 + 0.9 * Math.random()), 0.0002);
+  bits.size[i] = kind === FX.SPARKS ? 0.004 : grain;  // a spark's glow is bigger than the bead
   bits.drag[i] = 3 * AIR.rho * spec.cd / (4 * spec.rho * grain);
   bits.bounce[i] = spec.bounce;
   bits.spark[i] = kind === FX.SPARKS ? 1 : 0;
@@ -689,110 +810,149 @@ function spawnBit(kind, at, dir, spread, size, speed, life, color) {
   const tone = 0.8 + Math.random() * 0.4;
   bits.base.set([Math.min(color[0] * glow * tone, 1), Math.min(color[1] * glow * tone, 1), Math.min(color[2] * glow * tone, 1)], i * 3);
   bits.col.set(bits.base.subarray(i * 3, i * 3 + 3), i * 3);
+  bits.alpha[i] = 1;
   bits.life[i] = life * (0.6 + Math.random() * 0.6);
   bits.age[i] = 0;
 }
-function spawnPuff(at, dir, spread, size, speed, life, color) {
+function spawnPuff(at, dir, spread, size, speed, mass, color) {
   if (puffs.length >= PUFF_MAX) return;
-  const sp = puffPool.pop() || new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTexture, transparent: true, depthWrite: false }));
+  const tex = puffTextures[(Math.random() * puffTextures.length) | 0];
+  const sp = puffPool.pop() || new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false }));
+  sp.material.map = tex;
   sp.material.color.setRGB(color[0], color[1], color[2]);
+  sp.material.rotation = Math.random() * 6.28;
   const d = coneDir(dir, spread), s = speed * (0.3 + Math.random() * 0.7);
-  const jitter = size * 0.6, r0 = Math.max(size * 0.5, 0.02);
+  const jitter = size * 0.8, r0 = Math.max(size * (0.4 + 0.4 * Math.random()), 0.02);
   sp.position.set(at[0] + (Math.random() - 0.5) * jitter, at[1] + (Math.random() - 0.5) * jitter, at[2] + (Math.random() - 0.5) * jitter);
   scene.add(sp);
   // Grains 10 to 50 micrometres (concrete and plaster dust): Stokes settling speed rho g d^2 / (18 mu), 2400 kg/m^3.
   const grain = 1e-5 + 4e-5 * Math.random();
   puffs.push({
-    sp, v0: [d[0] * s, d[1] * s, d[2] * s], r0, t0: r0 / Math.max(s, 0.05), age: 0,
+    sp, v0: [d[0] * s, d[1] * s, d[2] * s], r0, t0: r0 / Math.max(s, 0.05), age: 0, mass,
     settle: 2400 * AIR.g * grain * grain / (18 * AIR.mu),
-    spreadV: [0, 0], from: [at[0], at[2]], phase: Math.random() * 6.28,
-    life: life * (1.2 + Math.random() * 0.8),  // fine dust hangs in the air
+    // Cross-section of its grains (Q 2, 30 micrometres, 2400 kg/m^3), for its optical depth.
+    area: 2 * 1.5 * mass / (2400 * 3e-5),
+    spin: (Math.random() - 0.5) * 0.6, aspect: 0.75 + 0.5 * Math.random(),
+    ground: [0, 0], from: [at[0], at[2]], phase: Math.random() * 6.28,
   });
 }
-// Small eddies: a gentle swirling flow (a few cm/s), the same everywhere at a given moment.
-function eddy(x, y, z, t, out) {
-  const a = 0.08;
-  out[0] = a * Math.sin(1.3 * y + 0.7 * t) + 0.5 * a * Math.sin(0.8 * z - 0.4 * t);
-  out[1] = 0.4 * a * Math.sin(0.9 * x + 0.6 * t);
-  out[2] = a * Math.cos(1.1 * x + 0.5 * t) + 0.5 * a * Math.cos(0.7 * y + 0.3 * t);
-  return out;
+
+// Pieces the engine tidied away (crumbs left lying alone): they settle into the ground instead of vanishing.
+const fading = [];
+function fadeOut(mesh) {
+  mesh.updateWorldMatrix(true, false);
+  scene.attach(mesh);
+  mesh.geometry.computeBoundingSphere();
+  const c = mesh.geometry.boundingSphere.center.clone();
+  fading.push({ mesh, c, at: c.clone().applyMatrix4(mesh.matrixWorld), r: mesh.geometry.boundingSphere.radius, age: 0 });
 }
-const eddyVel = [0, 0, 0];
+
+const airVel = [0, 0, 0];
 function updateEffects(dt) {
   if (!bitsGeo) return;
   fxClock += dt;
+  fxFrame++;
+  for (let i = gusts.length - 1; i >= 0; i--) {
+    const g = gusts[i];
+    g.age += dt;
+    if (g.u0 * Math.pow(1 + g.age / g.t0, -0.75) < 0.03) gusts.splice(i, 1);
+  }
+  updateWakes();
   for (let i = bits.n - 1; i >= 0; i--) {
     bits.age[i] += dt;
     if (bits.age[i] >= bits.life[i]) {
       // Swap the last one in.
       const last = --bits.n;
-      for (const a of [bits.pos, bits.vel, bits.col, bits.base]) a.copyWithin(i * 3, last * 3, last * 3 + 3);
-      bits.life[i] = bits.life[last]; bits.age[i] = bits.age[last]; bits.drag[i] = bits.drag[last];
-      bits.bounce[i] = bits.bounce[last]; bits.spark[i] = bits.spark[last];
+      for (const a of [bits.pos, bits.vel, bits.col, bits.base, bits.air]) a.copyWithin(i * 3, last * 3, last * 3 + 3);
+      for (const a of [bits.life, bits.age, bits.drag, bits.bounce, bits.spark, bits.size, bits.alpha]) a[i] = a[last];
       continue;
     }
     const k = i * 3;
-    // Gravity, then quadratic air drag (solved implicitly, so it can never reverse the motion).
+    // Gravity, then quadratic drag against the air around it (implicit, so it can never overshoot the air's speed).
+    // The air changes slowly: each grain looks it up every fourth frame, a quarter of them each frame (and on its first).
+    if (bits.age[i] <= dt || (i + fxFrame) % 4 === 0) {
+      airAt(bits.pos[k], bits.pos[k + 1], bits.pos[k + 2], airVel);
+      bits.air[k] = airVel[0]; bits.air[k + 1] = airVel[1]; bits.air[k + 2] = airVel[2];
+    }
+    const ax = bits.air[k], ay = bits.air[k + 1], az = bits.air[k + 2];
     bits.vel[k + 1] -= AIR.g * dt;
-    const speed = Math.hypot(bits.vel[k], bits.vel[k + 1], bits.vel[k + 2]);
-    const keep = 1 / (1 + bits.drag[i] * speed * dt);
-    bits.vel[k] *= keep; bits.vel[k + 1] *= keep; bits.vel[k + 2] *= keep;
+    const rx = bits.vel[k] - ax, ry = bits.vel[k + 1] - ay, rz = bits.vel[k + 2] - az;
+    const keep = 1 / (1 + bits.drag[i] * Math.hypot(rx, ry, rz) * dt);
+    bits.vel[k] = ax + rx * keep; bits.vel[k + 1] = ay + ry * keep; bits.vel[k + 2] = az + rz * keep;
     bits.pos[k] += bits.vel[k] * dt; bits.pos[k + 1] += bits.vel[k + 1] * dt; bits.pos[k + 2] += bits.vel[k + 2] * dt;
-    if (bits.pos[k + 1] < 0.01) {
-      bits.pos[k + 1] = 0.01;
+    const floor = 0.5 * bits.size[i];
+    if (bits.pos[k + 1] < floor) {
+      bits.pos[k + 1] = floor;
       bits.vel[k + 1] *= -bits.bounce[i];
       bits.vel[k] *= 0.5; bits.vel[k + 2] *= 0.5;  // sliding friction on the bounce
+      // Come to rest: it only has a moment left (a grain on the ground is lost among the rubble).
+      if (Math.abs(bits.vel[k + 1]) < 0.3) bits.life[i] = Math.min(bits.life[i], bits.age[i] + 0.5);
     }
     const t = bits.age[i] / bits.life[i];
     if (bits.spark[i]) {
       // Cooling: white-hot, then yellow, orange and dull red, then too cool to see (below about 800 K).
       const heat = Math.exp(-3 * t);
       bits.col[k] = Math.min(1, 1.6 * heat + 0.2); bits.col[k + 1] = Math.min(1, 1.3 * heat * heat); bits.col[k + 2] = Math.min(1, heat * heat * heat);
-      if (heat < 0.15) { const f = heat / 0.15; bits.col[k] *= f; bits.col[k + 1] *= f; bits.col[k + 2] *= f; }
+      bits.alpha[i] = Math.min(1, heat / 0.15);
     } else {
-      const f = 1 - Math.max(0, (t - 0.7) / 0.3);  // fade at the end
-      bits.col[k] = bits.base[k] * f; bits.col[k + 1] = bits.base[k + 1] * f; bits.col[k + 2] = bits.base[k + 2] * f;
+      bits.alpha[i] = Math.min(1, (bits.life[i] - bits.age[i]) / 0.4);  // fade out over its last moment
     }
   }
   bitsGeo.setDrawRange(0, bits.n);
+  bitsMesh.material.uniforms.scale.value = bitsScale();
   perf.fxBits = bits.n; perf.fxPuffs = puffs.length;
-  bitsGeo.attributes.position.needsUpdate = true;
-  bitsGeo.attributes.color.needsUpdate = true;
+  for (const name of ["position", "color", "size", "alpha"]) bitsGeo.attributes[name].needsUpdate = true;
   for (let i = puffs.length - 1; i >= 0; i--) {
     const p = puffs[i];
     p.age += dt;
-    const t = p.age / p.life;
-    if (t >= 1) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
-    // The puff's own motion dies away as it takes in air (speed ~ t^-3/4), it drifts on the eddies and sinks at its
-    // grains' settling speed; once it reaches the ground its downward push turns into spreading out along it.
+    // Its own push dies away as it takes in air (speed ~ t^-3/4); it rides the air and sinks at its grains' settling
+    // speed; at the ground the sinking turns into rolling out along it.
     const slow = Math.pow(1 + p.age / p.t0, -0.75);
     const pos = p.sp.position;
-    eddy(pos.x, pos.y, pos.z, fxClock + p.phase, eddyVel);
-    let vx = p.v0[0] * slow + eddyVel[0] + p.spreadV[0];
-    let vy = p.v0[1] * slow + eddyVel[1] - p.settle;
-    let vz = p.v0[2] * slow + eddyVel[2] + p.spreadV[1];
-    // Grows: the puff's own mixing (radius ~ t^1/4) and the eddies' (sqrt(2 K t), K about 0.03 m^2/s).
+    airAt(pos.x, pos.y, pos.z, airVel);
+    let vx = p.v0[0] * slow + airVel[0] + p.ground[0];
+    let vy = p.v0[1] * slow + airVel[1] - p.settle;
+    let vz = p.v0[2] * slow + airVel[2] + p.ground[1];
+    // Grows: its own mixing (radius ~ t^1/4) and the eddies' (sqrt(2 K t), K about 0.03 m^2/s).
     const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * 0.03 * p.age);
     const floor = 0.35 * r;
     if (pos.y + vy * dt < floor) {
       if (vy < 0) {
-        // Along the ground, away from where it came from (a dust cloud rolling out from a collapse).
         let ax = pos.x - p.from[0], az = pos.z - p.from[1];
-        const al = Math.hypot(ax, az) || 1;
+        const al = Math.hypot(ax, az);
         if (al < 1e-3) { ax = Math.cos(p.phase); az = Math.sin(p.phase); }
-        p.spreadV[0] += (ax / al) * -vy * 0.6; p.spreadV[1] += (az / al) * -vy * 0.6;
+        const n = Math.hypot(ax, az) || 1;
+        p.ground[0] += (ax / n) * -vy * 0.6; p.ground[1] += (az / n) * -vy * 0.6;
         p.v0[1] = Math.max(p.v0[1], 0);
       }
       vy = Math.max(vy, (floor - pos.y) / Math.max(dt, 1e-3));
     }
-    p.spreadV[0] *= 1 - Math.min(1, 1.5 * dt); p.spreadV[1] *= 1 - Math.min(1, 1.5 * dt);  // ground friction
+    p.ground[0] *= 1 - Math.min(1, 1.5 * dt); p.ground[1] *= 1 - Math.min(1, 1.5 * dt);  // ground friction
     pos.x += vx * dt; pos.y += vy * dt; pos.z += vz * dt;
-    p.sp.scale.setScalar(2 * r);
-    // How much light gets through (Beer-Lambert: 1 - e^-tau). A fresh cloud is thick (tau about 12); as it spreads its
-    // optical depth falls with concentration x depth, ~ (r0 / r)^2, so it stays dense a while and then thins out.
-    // It fades in fast and out over the last of its life as the dust settles.
-    const tau = 12 * Math.pow(p.r0 / r, 2);
-    p.sp.material.opacity = 0.55 * (1 - Math.exp(-tau)) * Math.min(1, p.age * 8) * Math.min(1, (1 - t) / 0.3);
+    // Turned and stretched a little by the eddies it rides.
+    p.sp.material.rotation += p.spin * dt;
+    p.sp.scale.set(2 * r * p.aspect, 2 * r / p.aspect, 1);
+    // As thick as the dust in it: tau = Q A / (pi r^2); 1 - e^-tau of the light is blocked. Fades in over a few
+    // hundredths of a second, and goes once it has thinned to nothing.
+    const tau = p.area / (Math.PI * r * r);
+    if ((p.age > 0.3 && tau < 0.01) || p.age > 20) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
+    p.sp.material.opacity = Math.min(0.85, 1 - Math.exp(-tau)) * Math.min(1, p.age * 12);
+  }
+  for (let i = fading.length - 1; i >= 0; i--) {
+    const f = fading[i];
+    f.age += dt;
+    const t = f.age / 1.5;
+    if (t >= 1) {
+      f.mesh.parent?.remove(f.mesh);
+      f.mesh.geometry.dispose();
+      fading.splice(i, 1);
+      continue;
+    }
+    // Shrinks about its own middle while sinking a little, like a crumb working into the dirt.
+    const s = 1 - t * t;
+    f.mesh.scale.setScalar(s);
+    const off = f.c.clone().multiplyScalar(s).applyQuaternion(f.mesh.quaternion);
+    f.mesh.position.set(f.at.x - off.x, f.at.y - off.y - 0.5 * f.r * t, f.at.z - off.z);
   }
 }
 function clearEffects() {
@@ -800,6 +960,9 @@ function clearEffects() {
   if (bitsGeo) bitsGeo.setDrawRange(0, 0);
   for (const p of puffs) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); }
   puffs.length = 0;
+  gusts.length = 0;
+  for (const f of fading) { f.mesh.parent?.remove(f.mesh); f.mesh.geometry.dispose(); }
+  fading.length = 0;
 }
 
 function frame(now, driven) {
@@ -822,7 +985,9 @@ function frame(now, driven) {
     k.m.material.opacity = 0.35 * Math.max(0, 1 - k.age / 1.4);
     if (k.age > 1.4) { k.m.parent?.remove(k.m); markerPool.push(k.m); markers.splice(i, 1); }
   }
+  const f0 = performance.now();
   updateEffects(real * (state.slow ? 0.2 : 1));
+  perf.fx += performance.now() - f0;
   frames++; fpsTime += real;
   if (fpsTime > 0.5) { fps = frames / fpsTime; frames = 0; fpsTime = 0; updateStats(); }
   const r0 = performance.now();

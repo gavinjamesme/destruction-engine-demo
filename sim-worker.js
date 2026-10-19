@@ -282,7 +282,7 @@ function runCommands() {
         if (!e) break;
         dropCollider(e);
         chunks.delete(c);
-        out.ops.push({ op: "retire", c });
+        out.ops.push({ op: "retire", c, fade: i32(p + L.flag) !== 0 });  // flag: tidied away (fade it), not replaced
         break;
       }
       case 2: {  // CreateBody
@@ -380,7 +380,8 @@ function readEvents() {
   return n;
 }
 
-// Effects: 15 numbers each (kind, count, position, direction, spread, size, speed, lifetime, colour); the page draws.
+// Effects: 16 numbers each (kind, count, position, direction, spread, size, speed, lifetime, colour, mass); the page
+// draws. (The mass follows the colour in destruct_effect.)
 function readEffects() {
   const n = M._destruct_take_effects(world);
   if (n <= 0) return;
@@ -391,7 +392,7 @@ function readEffects() {
     out.fx.push(i32(p + L.fxKind), i32(p + L.fxCount),
       f32(p + L.fxPos), f32(p + L.fxPos + 4), f32(p + L.fxPos + 8), f32(p + L.fxDir), f32(p + L.fxDir + 4), f32(p + L.fxDir + 8),
       f32(p + L.fxSpread), f32(p + L.fxSize), f32(p + L.fxSpeed), f32(p + L.fxLife),
-      f32(p + L.fxColor), f32(p + L.fxColor + 4), f32(p + L.fxColor + 8));
+      f32(p + L.fxColor), f32(p + L.fxColor + 4), f32(p + L.fxColor + 8), f32(p + L.fxColor + 12));
   }
 }
 
