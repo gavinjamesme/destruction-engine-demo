@@ -289,7 +289,9 @@ function runCommands() {
         const isStatic = i32(p + L.isStatic) !== 0;
         const like = bodies.get(key(o, u64(p + L.placeLike)));
         const at = objects.get(o)?.at || [0, 0, 0];  // a new body not like another: where the object stands
-        let t = { x: at[0], y: at[1], z: at[2] }, q = { x: 0, y: 0, z: 0, w: 1 }, v = { x: 0, y: 0, z: 0 }, w = { x: 0, y: 0, z: 0 };
+        // (A loose object starts 2 mm up and settles: one starting exactly on the ground along a seam between two of
+        // its pieces' colliders can get a wild first contact in Rapier, flinging it.)
+        let t = { x: at[0], y: at[1] + (isStatic ? 0 : 0.002), z: at[2] }, q = { x: 0, y: 0, z: 0, w: 1 }, v = { x: 0, y: 0, z: 0 }, w = { x: 0, y: 0, z: 0 };
         if (like) {
           t = like.rb.translation(); q = like.rb.rotation();
           if (!like.static) { v = like.rb.linvel(); w = like.rb.angvel(); }
