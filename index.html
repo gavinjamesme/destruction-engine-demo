@@ -1,0 +1,852 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Destruction Test Range</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<script src="coi.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="stylesheet" crossorigin href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one full-bleed 3D range; a read-out strip on top, a control deck at the bottom, both over the scene. */
+:root {
+  --deck: rgba(22, 26, 31, 0.86);
+  --deck-solid: #161a1f;
+  --line: rgba(196, 205, 214, 0.18);
+  --ink: #e8ecef;
+  --ink-dim: #9aa6b1;
+  --amber: #e7a33e;
+  --amber-ink: #1b1408;
+  --break: #ff8c1a;
+  --crumble: #e6e6d9;
+  --hit: #33d9ff;
+  --dent: #bf66ff;
+  --collapse: #ff2626;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: #8fb2d6; color: var(--ink); font-family: var(--mono); overflow: hidden; overscroll-behavior: none; }
+#scene { position: fixed; inset: 0; touch-action: none; display: block; width: 100%; height: 100%; }
+.readout {
+  position: fixed; top: 0; left: 0; right: 0;
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  padding-bottom: 8px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: linear-gradient(var(--deck), rgba(22, 26, 31, 0));
+  pointer-events: none;
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums;
+}
+.readout .what { font-family: var(--display); font-weight: 700; font-size: 22px; letter-spacing: 0.02em; text-transform: uppercase; line-height: 1.1; }
+.readout .what small { font-family: var(--mono); font-weight: 400; font-size: 11px; color: var(--ink-dim); text-transform: none; letter-spacing: 0; margin-left: 8px; }
+.readout .stats { color: var(--ink-dim); }
+.readout .log { color: var(--ink); opacity: 0.92; min-height: 1.45em; }
+.deck {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  padding-top: 10px;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+  background: var(--deck);
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.bar { display: flex; gap: 8px; align-items: flex-end; }
+.field { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.field span { font-family: var(--display); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
+.btn, select {
+  font-family: var(--display); font-weight: 600; font-size: 15px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--ink); background: var(--deck-solid); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; min-height: 44px; cursor: pointer;
+}
+select { width: 100%; text-transform: none; font-family: var(--mono); font-weight: 500; font-size: 14px; letter-spacing: 0; }
+.btn.icon { flex: 0 0 auto; width: 44px; padding: 0; display: grid; place-items: center; }
+.btn.icon[aria-expanded="true"], .btn.toggle[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+.btn:focus-visible, select:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.hint { font-size: 11px; color: var(--ink-dim); text-align: center; }
+/* Settings: a sheet that rises from the deck. */
+.sheet {
+  position: fixed; left: 0; right: 0; z-index: 3;
+  bottom: var(--deck-h, 96px);
+  margin: 0 auto; max-width: 560px;
+  padding: 12px max(16px, env(safe-area-inset-left, 0px)) 12px max(16px, env(safe-area-inset-right, 0px));
+  background: var(--deck-solid); border: 1px solid var(--line); border-bottom: 0; border-radius: 12px 12px 0 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sheet[hidden] { display: none; }
+.sheet-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.sheet-row select { width: auto; min-width: 9.5em; }
+.sheet-row .btn { min-width: 6.5em; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; color: var(--ink-dim); padding-top: 4px; border-top: 1px solid var(--line); }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.version { font-size: 10px; color: var(--ink-dim); }
+.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--deck-solid); color: var(--ink); font-family: var(--display); font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; z-index: 5; text-align: center; padding-inline: 24px; }
+.loading[hidden] { display: none; }
+.loading small { display: block; font-family: var(--mono); font-size: 12px; color: var(--ink-dim); text-transform: none; letter-spacing: 0; margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<canvas id="scene"></canvas>
+<div class="readout" aria-live="polite">
+  <div class="what" id="what">Loading<small id="family"></small></div>
+  <div class="stats" id="stats">&nbsp;</div>
+  <div class="log" id="log">&nbsp;</div>
+</div>
+<div class="deck">
+  <div class="bar">
+    <label class="field"><span>Hit with</span><select id="impact" aria-label="What hits it"></select></label>
+    <label class="field"><span>Target</span><select id="target" aria-label="Material or object"></select></label>
+    <button class="btn icon" id="settings-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings" title="Settings">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 6h11.2a3 3 0 0 1 5.6 0H21v2h-1.2a3 3 0 0 1-5.6 0H3V6zm14 1a1 1 0 1 0 0-.01zM3 16h3.2a3 3 0 0 1 5.6 0H21v2h-9.2a3 3 0 0 1-5.6 0H3v-2zm6 1a1 1 0 1 0 0-.01z"/></svg>
+      <span class="sr">Settings</span>
+    </button>
+  </div>
+  <div class="hint" id="hint">Tap to hit · drag to orbit · pinch to zoom</div>
+</div>
+<div class="sheet" id="settings" role="dialog" aria-label="Settings" hidden>
+  <div class="sheet-row"><span>Blast wave in front of it</span><button class="btn" id="blast" type="button">Set off</button></div>
+  <div class="sheet-row"><span>Slow motion</span><button class="btn toggle" id="slow" type="button" aria-pressed="false">Off</button></div>
+  <div class="sheet-row"><span>Detail</span>
+    <select id="detail" aria-label="Detail"><option value="0">Cheap</option><option value="1">Normal</option><option value="2">Cinematic</option></select></div>
+  <div class="sheet-row"><span>How a hit's energy is shared</span>
+    <select id="budget" aria-label="Energy sharing"><option value="1">Weighted</option><option value="2">Nearest first</option><option value="0">Off (each piece full)</option></select></div>
+  <div class="sheet-row"><span>Soft-body wobble</span><button class="btn toggle" id="soft" type="button" aria-pressed="false">Off</button></div>
+  <div class="sheet-row"><span>Break it a different way</span><button class="btn" id="reset" type="button">New pattern</button></div>
+  <div class="legend">
+    <span><i style="background:var(--break)"></i>break</span><span><i style="background:var(--crumble)"></i>crumble</span>
+    <span><i style="background:var(--hit)"></i>debris or bullet</span><span><i style="background:var(--dent)"></i>dent or chip</span>
+    <span><i style="background:var(--collapse)"></i>collapse</span>
+  </div>
+  <div class="version" id="version"></div>
+</div>
+<div class="loading" id="loading">Building the range<small id="loading-note">Loading the engine and physics</small></div>
+
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script type="module">
+// The page draws; the simulation (the destruction engine and the physics) runs in sim-worker.js, on its own thread.
+// Each frame the page asks for the next steps and draws what came back from the last ones, so drawing and simulating
+// happen at the same time, as on Quest.
+
+// What hits things: the engine's impactor library (sent by the worker at start), each a physical thing with a mass
+// and speed.
+let IMPACTS = [];
+function energyLabel(j) {
+  return j >= 1e6 ? `${(j / 1e6).toFixed(1)} MJ` : j >= 1000 ? `${(j / 1000).toFixed(j >= 10000 ? 0 : 1)} kJ` : `${j.toFixed(0)} J`;
+}
+const MARKER_COLOR = { break: 0xff8c1a, crumble: 0xe6e6d9, debris_hit: 0x33d9ff, collapsed: 0xff2626, deform: 0xbf66ff };
+
+const $ = (id) => document.getElementById(id);
+// Phones and tablets: lighter settings (Cheap detail caps loose pieces and turns crumbs into particles).
+const PHONE = window.matchMedia("(pointer: coarse)").matches || Math.min(window.innerWidth, window.innerHeight) < 600;
+const note = (t) => { $("loading-note").textContent = t; };
+
+const sim = new Worker(new URL("sim-worker.js", import.meta.url), { type: "module" });
+const state = {
+  impact: 3, slow: false, soft: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
+  size: [5, 3, 0.6], scale: 1, info: null, loose: 0, threads: 0, counts: { break: 0, crumble: 0, debris_hit: 0, deform: 0 },
+};
+const chunks = new Map();   // chunk id -> { mesh, body }
+const bodies = new Map();   // body id -> { group, static }
+const markers = [];
+
+// ---------------------------------------------------------------- three.js scene
+const canvas = $("scene");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, PHONE ? 1.25 : 2));
+renderer.shadowMap.enabled = true;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fb2d6);
+scene.fog = new THREE.Fog(0x8fb2d6, 30, 90);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.02, 200);
+scene.add(new THREE.HemisphereLight(0xdfe9f5, 0x55603f, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+sun.position.set(6, 12, 8);
+sun.castShadow = true;
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.03;
+sun.shadow.mapSize.set(PHONE ? 1024 : 2048, PHONE ? 1024 : 2048);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 40 });
+scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x6f7b58, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const view = { yaw: 0.35, pitch: 0.28, dist: 9, target: new THREE.Vector3(0, 1.5, 0) };
+function placeCamera() {
+  const c = Math.cos(view.pitch);
+  camera.position.set(
+    view.target.x + view.dist * c * Math.sin(view.yaw),
+    view.target.y + view.dist * Math.sin(view.pitch),
+    view.target.z + view.dist * c * Math.cos(view.yaw));
+  camera.lookAt(view.target);
+}
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+
+// ---------------------------------------------------------------- chunk meshes
+// The engine's finished vertex buffer (position, normal, uv and a tag per vertex) arrives from the worker; this only
+// tints it and passes it to the GPU.
+function chunkGeometry(c, verts) {
+  const g0 = performance.now();
+  perf.chunkMeshesDrawn++;
+  const count = verts.length / 9;
+  const col = new Float32Array(count * 3);
+  const tint = state.info.tint, shade = 0.42;
+  const tone = 0.94 + 0.12 * (((c * 2654435761) >>> 0) % 1000) / 1000;  // pieces vary a little
+  for (let v = 0; v < count; v++) {
+    const k = verts[v * 9 + 8] === 0 ? shade : tone;  // broken faces darker
+    col[v * 3] = tint[0] * k; col[v * 3 + 1] = tint[1] * k; col[v * 3 + 2] = tint[2] * k;
+  }
+  const inter = new THREE.InterleavedBuffer(verts, 9);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.InterleavedBufferAttribute(inter, 3, 0));
+  geo.setAttribute("normal", new THREE.InterleavedBufferAttribute(inter, 3, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  perf.upload += performance.now() - g0;
+  return geo;
+}
+let chunkMaterial = null;
+function makeChunkMaterial() {
+  const o = state.info.opacity;
+  chunkMaterial = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: state.info.family === "metal" ? 0.35 : 0.85, metalness: state.info.family === "metal" ? 0.55 : 0,
+    transparent: o < 1, opacity: Math.max(o, 0.25), side: THREE.DoubleSide, flatShading: true,
+  });
+}
+
+// ---------------------------------------------------------------- what the worker sends back
+// Changes in order (new chunk meshes, bodies, chunks moving between bodies), then where the moving bodies are now.
+function applyOps(ops) {
+  for (const o of ops) {
+    switch (o.op) {
+      case "add": {
+        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.verts), chunkMaterial);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.userData.chunk = o.c;
+        chunks.set(o.c, { mesh, body: 0 });
+        break;
+      }
+      case "retire": {
+        const e = chunks.get(o.c);
+        if (!e) break;
+        e.mesh.parent?.remove(e.mesh);
+        e.mesh.geometry.dispose();
+        chunks.delete(o.c);
+        break;
+      }
+      case "body": {
+        const group = new THREE.Group();
+        const [x, y, z, qx, qy, qz, qw] = o.pose;
+        group.position.set(x, y, z);
+        group.quaternion.set(qx, qy, qz, qw);
+        scene.add(group);
+        bodies.set(o.id, { group, static: o.static });
+        break;
+      }
+      case "attach": {
+        const e = chunks.get(o.c), b = bodies.get(o.id);
+        if (!e || !b) break;
+        e.body = o.id;
+        b.group.add(e.mesh);
+        e.mesh.castShadow = b.static || !PHONE;  // on phones only the standing structure casts shadows
+        break;
+      }
+      case "unbody": {
+        const b = bodies.get(o.id);
+        if (!b) break;
+        b.group.parent?.remove(b.group);
+        bodies.delete(o.id);
+        break;
+      }
+      case "deform": {
+        const e = chunks.get(o.c);
+        if (!e) break;
+        e.mesh.geometry.dispose();
+        e.mesh.geometry = chunkGeometry(o.c, o.verts);
+        break;
+      }
+    }
+  }
+}
+function applyPoses(p) {
+  for (let i = 0; i < p.length; i += 8) {
+    const b = bodies.get(p[i]);
+    if (!b) continue;
+    b.group.position.set(p[i + 1], p[i + 2], p[i + 3]);
+    b.group.quaternion.set(p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
+  }
+}
+function applyEvents(events, extra) {
+  for (const [type, x, y, z, intensity] of events) {
+    state.counts[type] = (state.counts[type] || 0) + 1;
+    addMarker(type, x, y, z, intensity);
+  }
+  for (const [type, x, y, z, intensity] of extra) addMarker(type, x, y, z, intensity);
+}
+
+// Flashes share one sphere and reuse their materials, and at most a dozen show at once (a big break reports dozens of
+// crumbles in a frame; making a mesh and material for each cost more than the break).
+const markerSphere = new THREE.SphereGeometry(1, 12, 8);
+const markerPool = [];
+function addMarker(type, x, y, z, intensity) {
+  const big = type === "break" || type === "collapsed" || type === "deform";
+  const r = big ? 0.06 + intensity * 0.45 : 0.025 + intensity * 0.08;
+  if (markers.length >= 12) {
+    if (!big) return;
+    const old = markers.shift();
+    old.m.parent?.remove(old.m);
+    markerPool.push(old.m);
+  }
+  const m = markerPool.pop() || new THREE.Mesh(markerSphere, new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+  m.material.color.setHex(MARKER_COLOR[type] || 0xffffff);
+  m.material.opacity = 0.35;
+  m.scale.setScalar(r * Math.min(1, state.scale));
+  m.position.set(x, y, z);
+  scene.add(m);
+  markers.push({ m, age: 0 });
+}
+
+// ---------------------------------------------------------------- building a target
+function clearScene() {
+  for (const b of bodies.values()) b.group.parent?.remove(b.group);
+  for (const e of chunks.values()) e.mesh.geometry.dispose();
+  bodies.clear(); chunks.clear();
+  for (const k of markers) { k.m.parent?.remove(k.m); markerPool.push(k.m); }
+  markers.length = 0;
+  clearEffects();
+  clearProjectiles();
+}
+// Asks the worker for a new target; it answers with a frame carrying `built` (and the target's first pieces).
+function build() {
+  sim.postMessage({ type: "build", target: state.target, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
+}
+function onBuilt(b) {
+  clearScene();
+  state.info = b.info;
+  state.size = b.size;
+  state.scale = b.scale;
+  makeChunkMaterial();
+  const size = b.size, span = Math.max(size[0], size[1], size[2]);
+  view.target.set(0, size[1] / 2, 0);
+  // Portrait screens see less across, so stand further back.
+  view.dist = Math.max(span * 2.1 / Math.min(1, Math.max(camera.aspect, 0.45) * 1.4), 0.35);
+  placeCamera();
+  state.counts = { break: 0, crumble: 0, debris_hit: 0, deform: 0 };
+  $("what").firstChild.textContent = b.label;
+  $("family").textContent = `${b.info.family}${b.info.yieldPa > 0 ? " · dents" : ""}${b.info.wobble > 0 ? " · wobbles" : ""}`;
+  $("log").textContent = " ";
+}
+
+// ---------------------------------------------------------------- stepping
+// One request in flight at a time: the page asks for the steps the time since the last request calls for, keeps
+// drawing, and asks again once the answer is in. A slow break slows the simulation, never the drawing.
+let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsTime = 0;
+let waiting = false, ready = false;
+const waiters = [];  // rangeDrive: resolved when the next step answer arrives
+// Where time goes (ms, summed; window.rangePerf for profiling). The worker's: physics, engine, commands (geometry and
+// colliders), its worst step. The page's: upload (meshes to the GPU), render, its worst frame.
+const perf = { frames: 0, render: 0, upload: 0, worst: 0, chunkMeshesDrawn: 0, fxBits: 0, fxPuffs: 0 };
+window.rangePerf = perf;
+window.rangeResetPerf = () => { for (const k of Object.keys(perf)) perf[k] = 0; sim.postMessage({ type: "resetPerf" }); };
+window.rangeThreads = (n) => sim.postMessage({ type: "setting", threads: n });  // profiling: engine threads (0 = none)
+window.rangeShootAt = (nx, ny) => {  // a tap at a fraction of the canvas (profiling)
+  const r = renderer.domElement.getBoundingClientRect();
+  shoot(r.left + nx * r.width, r.top + ny * r.height);
+};
+// Profiling: run n frames at 60 Hz now (works while the page is hidden and requestAnimationFrame is paused).
+window.rangeDrive = async (n) => {
+  for (let i = 0; i < n; i++) {
+    const answered = new Promise((res) => waiters.push(res));
+    if (!waiting) { waiting = true; sim.postMessage({ type: "step", n: 1, dt: 1 / 60 }); }
+    await answered;
+    frame(last + 1000 / 60, true);
+  }
+  return { ...perf };
+};
+
+sim.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === "ready") return onReady(m);
+  if (m.type === "threads") { state.threads = m.threads; return; }
+  if (m.type === "error") { console.error("simulation:", m.message, "during", m.during); if (!ready) failed(m.message); return; }
+  if (m.type !== "frame") return;
+  if (m.built) onBuilt(m.built);
+  applyOps(m.ops);
+  applyPoses(m.poses);
+  applyEvents(m.events, m.markers);
+  readEffects(m.fx);
+  updateThrown(m.proj);
+  if (m.log) $("log").textContent = m.log;
+  state.loose = m.loose;
+  Object.assign(perf, m.perf);
+  if (m.stepped !== undefined) {
+    waiting = false;
+    while (waiters.length) waiters.shift()();
+  }
+};
+
+// ---------------------------------------------------------------- effects: what breaking things throws off
+// The engine says what, where, which way and how much (15 numbers each, from the worker); this draws it cheaply:
+// grit, splinters, shards and sparks as points that fly, fall and bounce once; dust as soft puffs that grow and fade.
+const FX = { DUST: 0, GRIT: 1, SPARKS: 2, SPLINTERS: 3, SHARDS: 4 };
+const FX_MAX = PHONE ? 700 : 1800, PUFF_MAX = PHONE ? 50 : 120;
+const bits = {
+  pos: new Float32Array(FX_MAX * 3), vel: new Float32Array(FX_MAX * 3), col: new Float32Array(FX_MAX * 3),
+  base: new Float32Array(FX_MAX * 3), life: new Float32Array(FX_MAX), age: new Float32Array(FX_MAX), grav: new Float32Array(FX_MAX), n: 0,
+};
+let bitsGeo = null, bitsMesh = null;
+const puffs = [], puffPool = [];
+let puffTexture = null;
+function setupEffects() {
+  bitsGeo = new THREE.BufferGeometry();
+  bitsGeo.setAttribute("position", new THREE.BufferAttribute(bits.pos, 3).setUsage(THREE.DynamicDrawUsage));
+  bitsGeo.setAttribute("color", new THREE.BufferAttribute(bits.col, 3).setUsage(THREE.DynamicDrawUsage));
+  bitsGeo.setDrawRange(0, 0);
+  bitsMesh = new THREE.Points(bitsGeo, new THREE.PointsMaterial({ size: 0.035, vertexColors: true, sizeAttenuation: true }));
+  bitsMesh.frustumCulled = false;
+  scene.add(bitsMesh);
+  // A soft round dot for dust puffs.
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d"), grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,1)"); grad.addColorStop(0.5, "rgba(255,255,255,0.45)"); grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  puffTexture = new THREE.CanvasTexture(c);
+}
+function readEffects(fx) {
+  for (let p = 0; p + 15 <= fx.length; p += 15) {
+    const kind = fx[p], count = fx[p + 1];
+    const at = [fx[p + 2], fx[p + 3], fx[p + 4]], dir = [fx[p + 5], fx[p + 6], fx[p + 7]];
+    const spread = fx[p + 8], size = fx[p + 9], speed = fx[p + 10], life = fx[p + 11];
+    const color = [fx[p + 12], fx[p + 13], fx[p + 14]];
+    if (kind === FX.DUST) for (let k = 0; k < Math.min(count, 14); k++) spawnPuff(at, dir, spread, size, speed, life, color);
+    else for (let k = 0; k < Math.min(count, 70); k++) spawnBit(kind, at, dir, spread, speed, life, color);
+  }
+}
+function coneDir(dir, spread) {
+  // A random direction within `spread` of dir.
+  const t = Math.tan(Math.min(spread, 1.4));
+  const r = [Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1];
+  const v = [dir[0] + r[0] * t, dir[1] + r[1] * t, dir[2] + r[2] * t];
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+function spawnBit(kind, at, dir, spread, speed, life, color) {
+  if (bits.n >= FX_MAX) return;
+  const i = bits.n++, d = coneDir(dir, spread), s = speed * (0.4 + Math.random() * 0.9);
+  bits.pos.set(at, i * 3);
+  bits.vel.set([d[0] * s, d[1] * s, d[2] * s], i * 3);
+  const glow = kind === FX.SPARKS ? 1.6 : kind === FX.SHARDS ? 1.25 : 1;
+  const tone = 0.8 + Math.random() * 0.4;
+  bits.base.set([Math.min(color[0] * glow * tone, 1), Math.min(color[1] * glow * tone, 1), Math.min(color[2] * glow * tone, 1)], i * 3);
+  bits.col.set(bits.base.subarray(i * 3, i * 3 + 3), i * 3);
+  bits.life[i] = life * (0.6 + Math.random() * 0.6);
+  bits.age[i] = 0;
+  bits.grav[i] = kind === FX.SPARKS ? 0.4 : 1;
+}
+function spawnPuff(at, dir, spread, size, speed, life, color) {
+  if (puffs.length >= PUFF_MAX) return;
+  const sp = puffPool.pop() || new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTexture, transparent: true, depthWrite: false }));
+  sp.material.color.setRGB(color[0], color[1], color[2]);
+  const d = coneDir(dir, spread), s = speed * (0.3 + Math.random() * 0.7);
+  const jitter = size * 0.6;
+  sp.position.set(at[0] + (Math.random() - 0.5) * jitter, at[1] + (Math.random() - 0.5) * jitter, at[2] + (Math.random() - 0.5) * jitter);
+  scene.add(sp);
+  puffs.push({ sp, v: [d[0] * s, d[1] * s + 0.15, d[2] * s], size, age: 0, life: life * (0.7 + Math.random() * 0.6) });
+}
+function updateEffects(dt) {
+  if (!bitsGeo) return;
+  for (let i = bits.n - 1; i >= 0; i--) {
+    bits.age[i] += dt;
+    if (bits.age[i] >= bits.life[i]) {
+      // Swap the last one in.
+      const last = --bits.n;
+      for (const a of [bits.pos, bits.vel, bits.col, bits.base]) a.copyWithin(i * 3, last * 3, last * 3 + 3);
+      bits.life[i] = bits.life[last]; bits.age[i] = bits.age[last]; bits.grav[i] = bits.grav[last];
+      continue;
+    }
+    const k = i * 3;
+    bits.vel[k + 1] -= 9.81 * bits.grav[i] * dt;
+    const drag = 1 - 0.6 * dt;
+    bits.vel[k] *= drag; bits.vel[k + 1] *= drag; bits.vel[k + 2] *= drag;
+    bits.pos[k] += bits.vel[k] * dt; bits.pos[k + 1] += bits.vel[k + 1] * dt; bits.pos[k + 2] += bits.vel[k + 2] * dt;
+    if (bits.pos[k + 1] < 0.01) { bits.pos[k + 1] = 0.01; bits.vel[k + 1] *= -0.25; bits.vel[k] *= 0.5; bits.vel[k + 2] *= 0.5; }
+    // Fade toward the end of their life (sparks cool from yellow to dark red).
+    const f = 1 - Math.max(0, (bits.age[i] / bits.life[i] - 0.6) / 0.4);
+    bits.col[k] = bits.base[k] * f; bits.col[k + 1] = bits.base[k + 1] * f * f; bits.col[k + 2] = bits.base[k + 2] * f * f;
+  }
+  bitsGeo.setDrawRange(0, bits.n);
+  perf.fxBits = bits.n; perf.fxPuffs = puffs.length;
+  bitsGeo.attributes.position.needsUpdate = true;
+  bitsGeo.attributes.color.needsUpdate = true;
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    p.age += dt;
+    const t = p.age / p.life;
+    if (t >= 1) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
+    const drag = 1 - 2.5 * dt;
+    p.v[0] *= drag; p.v[1] = p.v[1] * drag + 0.05 * dt; p.v[2] *= drag;
+    p.sp.position.x += p.v[0] * dt; p.sp.position.y += p.v[1] * dt; p.sp.position.z += p.v[2] * dt;
+    p.sp.scale.setScalar(p.size * (1 + 2.5 * t));
+    p.sp.material.opacity = 0.45 * (1 - t) * Math.min(1, p.age * 8);
+  }
+}
+function clearEffects() {
+  bits.n = 0;
+  if (bitsGeo) bitsGeo.setDrawRange(0, 0);
+  for (const p of puffs) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); }
+  puffs.length = 0;
+}
+
+function frame(now, driven) {
+  const t00 = performance.now();
+  const real = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  if (!driven) {
+    acc += real * (state.slow ? 0.2 : 1);
+    if (!waiting && ready) {
+      const cap = PHONE ? 2 : 4;
+      let n = Math.floor(acc * 60);
+      if (n >= cap) { n = cap; acc = 0; }  // running behind: drop time rather than fall further behind
+      else acc -= n / 60;
+      if (n > 0) { waiting = true; sim.postMessage({ type: "step", n, dt: 1 / 60 }); }
+    }
+  }
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const k = markers[i];
+    k.age += real;
+    k.m.material.opacity = 0.35 * Math.max(0, 1 - k.age / 1.4);
+    if (k.age > 1.4) { k.m.parent?.remove(k.m); markerPool.push(k.m); markers.splice(i, 1); }
+  }
+  updateEffects(real * (state.slow ? 0.2 : 1));
+  frames++; fpsTime += real;
+  if (fpsTime > 0.5) { fps = frames / fpsTime; frames = 0; fpsTime = 0; updateStats(); }
+  const r0 = performance.now();
+  renderer.render(scene, camera);
+  perf.render += performance.now() - r0;
+  perf.frames++;
+  perf.worst = Math.max(perf.worst, performance.now() - t00);
+  if (!driven) requestAnimationFrame(frame);
+}
+
+function updateStats() {
+  const c = state.counts;
+  $("stats").textContent = `${chunks.size} pieces · ${state.loose} loose · ${fps.toFixed(0)} fps · ` +
+    `${c.break || 0} breaks · ${c.crumble || 0} crumbles · ${c.deform || 0} ${state.info && state.info.yieldPa > 0 ? "dents" : "chips"}${state.slow ? " · slow motion" : ""}`;
+}
+
+// ---------------------------------------------------------------- hitting things
+const ray = new THREE.Raycaster();
+function shoot(clientX, clientY) {
+  const ndc = new THREE.Vector2((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const meshes = [];
+  for (const e of chunks.values()) if (e.mesh.parent) meshes.push(e.mesh);
+  const hit = ray.intersectObjects(meshes, false)[0];
+  if (!hit) return;
+  const imp = IMPACTS[state.impact], d = ray.ray.direction;
+  // The impactor arrives along the line of sight. A blast goes off a little in front of the surface.
+  const back = imp.kind === "blast" ? 0.6 * Math.max(state.scale, 0.3) : 0;
+  const p = hit.point.clone().addScaledVector(d, -back);
+  sim.postMessage({ type: "strike", imp: state.impact, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
+}
+
+// ---------------------------------------------------------------- throwing and swinging
+// What each choice in "Hit with" does with one finger: throw it (flick toward the target), swing it (drag a tool you
+// can see into the target), or hit at once where you tap (bullets, vehicles, charges). Two fingers always orbit and
+// zoom; on a computer, right-drag orbits and the wheel zooms. The bodies live in the worker; the page draws them.
+const THROWN = new Set(["thrown_toy", "baseball", "thrown_brick", "firecracker", "grenade"]);
+const SWUNG = new Set(["fist", "kick", "claw_hammer", "baseball_bat", "sledgehammer", "crowbar", "machete", "axe"]);
+const ROUND = new Set(["baseball", "fist", "kick", "baseball_bat", "wrecking_ball", "grenade", "firecracker"]);
+function gestureMode() {
+  const imp = IMPACTS[state.impact];
+  return !imp ? "tap" : THROWN.has(imp.name) ? "throw" : SWUNG.has(imp.name) ? "swing" : "tap";
+}
+const HINTS = {
+  throw: "Flick toward it to throw (harder flick, harder throw) · two fingers to orbit and zoom",
+  swing: "Drag across it to swing · two fingers to orbit and zoom",
+  tap: "Tap to hit · drag to orbit · pinch to zoom",
+};
+function updateHint() { $("hint").textContent = HINTS[gestureMode()]; }
+
+function screenRay(clientX, clientY) {
+  const ndc = new THREE.Vector2((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  return ray.ray;
+}
+// How far the target is along a screen ray (the nearest piece it meets, else the orbit centre's distance).
+function targetDistance(r) {
+  const meshes = [];
+  for (const e of chunks.values()) if (e.mesh.parent) meshes.push(e.mesh);
+  ray.ray.copy(r);
+  const hit = ray.intersectObjects(meshes, false)[0];
+  return hit ? hit.distance : camera.position.distanceTo(view.target);
+}
+function impactorShape(imp) {
+  // The same shape the worker gives its body: a ball for round things, a box the size of the face for flat ones.
+  const w = Math.max(imp.faceW, 0.02), h = Math.max(imp.faceH, 0.02);
+  if (imp.kind === "blast") return { ball: 0.04 };
+  if (ROUND.has(imp.name)) return { ball: 0.5 * Math.max(w, h) };
+  return { box: [0.5 * w, 0.5 * h, 0.5 * Math.max(Math.min(w, h), 0.04)] };
+}
+function impactorMesh(imp) {
+  const s = impactorShape(imp);
+  const geo = s.ball ? new THREE.SphereGeometry(s.ball, 16, 12) : new THREE.BoxGeometry(2 * s.box[0], 2 * s.box[1], 2 * s.box[2]);
+  const color = imp.kind === "blast" ? 0x3d4a2c : imp.name === "baseball" ? 0xf2efe6 : imp.name === "thrown_brick" ? 0xa04a35 : 0x8a9099;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: imp.name === "sledgehammer" || imp.name === "axe" ? 0.6 : 0, transparent: true }));
+  mesh.castShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+const thrown = new Map();  // id -> mesh of a thrown thing (in flight or lying where it landed)
+let nextThrown = 1;
+function dropMesh(mesh) {
+  mesh.parent?.remove(mesh);
+  mesh.geometry.dispose();
+  mesh.material.dispose();
+}
+// Where thrown things are (id, position, rotation, age); one that's missing has gone off, faded or been dropped.
+function updateThrown(p) {
+  const seen = new Set();
+  for (let i = 0; i < p.length; i += 9) {
+    const mesh = thrown.get(p[i]);
+    if (!mesh) continue;
+    seen.add(p[i]);
+    mesh.position.set(p[i + 1], p[i + 2], p[i + 3]);
+    mesh.quaternion.set(p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
+    const age = p[i + 8];
+    mesh.material.opacity = age > 8 ? Math.max(0, 1 - (age - 8) / 2) : 1;  // lies a while, then fades
+  }
+  for (const [id, mesh] of thrown) if (mesh.userData.sent && !seen.has(id)) { dropMesh(mesh); thrown.delete(id); }
+  for (const mesh of thrown.values()) mesh.userData.sent = true;
+}
+
+// The held tool: the worker's kinematic body follows the finger, pushing forward into the target as the drag goes on.
+let tool = null;
+function startSwing(clientX, clientY) {
+  const imp = IMPACTS[state.impact];
+  const r = screenRay(clientX, clientY);
+  const depth0 = Math.max(targetDistance(r) - 0.45 * Math.max(state.scale, 0.4), 0.3);
+  const p = r.origin.clone().addScaledVector(r.direction, depth0);
+  tool = { mesh: impactorMesh(imp), depth0, travelled: 0, x: clientX, y: clientY };
+  tool.mesh.position.copy(p);
+  tool.mesh.quaternion.copy(camera.quaternion);
+  const q = camera.quaternion;
+  sim.postMessage({ type: "swingStart", imp: state.impact, p: [p.x, p.y, p.z], q: [q.x, q.y, q.z, q.w] });
+}
+function moveSwing(clientX, clientY) {
+  if (!tool) return;
+  tool.travelled += Math.hypot(clientX - tool.x, clientY - tool.y);
+  tool.x = clientX; tool.y = clientY;
+  const r = screenRay(clientX, clientY);
+  // Pushes forward as the drag goes on: from in front of the target to a little past its surface.
+  const push = Math.min(tool.travelled / (0.5 * window.innerHeight), 1);
+  const depth = tool.depth0 + push * 0.65 * Math.max(state.scale, 0.4);
+  const p = r.origin.clone().addScaledVector(r.direction, depth);
+  tool.mesh.position.copy(p);
+  sim.postMessage({ type: "swingMove", p: [p.x, p.y, p.z] });
+}
+function endSwing() {
+  if (!tool) return;
+  const mesh = tool.mesh;
+  tool = null;
+  sim.postMessage({ type: "swingEnd" });
+  setTimeout(() => dropMesh(mesh), 250);
+}
+function clearProjectiles() {
+  for (const mesh of thrown.values()) dropMesh(mesh);
+  thrown.clear();
+  if (tool) { dropMesh(tool.mesh); tool = null; }
+}
+
+// Throwing: a flick toward the target. Where the finger lets go is where it aims; how fast it moves sets how hard
+// it is thrown (about two screen heights a second is a normal throw). A tap throws gently.
+function throwAt(clientX, clientY, screensPerSecond) {
+  const imp = IMPACTS[state.impact];
+  const r = screenRay(clientX, clientY);
+  const strength = Math.min(Math.max(screensPerSecond / 2.0, 0.35), 1.8);
+  const speed = imp.kind === "blast" ? 9 * strength : imp.speed * strength;
+  const from = camera.position.clone().addScaledVector(r.direction, 0.6).add(new THREE.Vector3(0, -0.15, 0));
+  const v = r.direction.clone().multiplyScalar(speed);
+  // A little lift so it still reaches the spot it was aimed at after falling on the way.
+  const flight = targetDistance(r) / Math.max(speed, 0.1);
+  v.y += Math.min(0.5 * 9.81 * flight, speed * 0.5);
+  const id = nextThrown++, mesh = impactorMesh(imp);
+  mesh.position.copy(from);
+  thrown.set(id, mesh);
+  sim.postMessage({ type: "throw", id, imp: state.impact, from: [from.x, from.y, from.z], v: [v.x, v.y, v.z] });
+}
+
+const pointers = new Map();
+let gesture = null;
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("pointerdown", (e) => {
+  if (!$("settings").hidden) { closeSettings(); return; }  // a tap on the scene just closes the menu
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* some browsers refuse capture; taps still work */ }
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const mode = gestureMode();
+  if (pointers.size === 1) {
+    const orbitOnly = e.button === 2 || (e.pointerType === "mouse" && e.shiftKey);
+    gesture = { x: e.clientX, y: e.clientY, moved: 0, t: performance.now(), mode: orbitOnly ? "orbit" : mode, samples: [[e.clientX, e.clientY, performance.now()]] };
+    if (gesture.mode === "swing") startSwing(e.clientX, e.clientY);
+  } else {
+    if (tool) endSwing();
+    gesture = { pinch: pinchDist(), dist: view.dist, moved: 99, mode: "two", mid: midpoint() };
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p || !gesture) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (pointers.size >= 2) {
+    // Two fingers: pinch zooms, moving them together orbits.
+    const d = pinchDist(), m = midpoint();
+    if (gesture.pinch > 0) view.dist = Math.min(Math.max(gesture.dist * gesture.pinch / d, 0.2), 60);
+    if (gesture.mid) { orbit(m.x - gesture.mid.x, m.y - gesture.mid.y); gesture.mid = m; }
+  } else {
+    gesture.moved += Math.abs(dx) + Math.abs(dy);
+    gesture.samples.push([e.clientX, e.clientY, performance.now()]);
+    if (gesture.samples.length > 8) gesture.samples.shift();
+    if (gesture.mode === "swing") moveSwing(e.clientX, e.clientY);
+    else if ((gesture.mode === "tap" || gesture.mode === "orbit") && gesture.moved > 8) orbit(dx, dy);
+  }
+  placeCamera();
+});
+function orbit(dx, dy) {
+  view.yaw -= dx * 0.006;
+  view.pitch = Math.min(Math.max(view.pitch + dy * 0.004, -0.05), 1.45);
+}
+function midpoint() {
+  const [a, b] = [...pointers.values()];
+  return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : null;
+}
+function end(e) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (gesture && pointers.size === 0) {
+    const quick = performance.now() - gesture.t < 500 && e.type === "pointerup";
+    if (gesture.mode === "tap" && gesture.moved <= 8 && quick) shoot(e.clientX, e.clientY);
+    if (gesture.mode === "swing") endSwing();
+    if (gesture.mode === "throw" && e.type === "pointerup") {
+      // Flick speed from the last few samples (screen heights per second).
+      const s = gesture.samples, a = s[0], b = s[s.length - 1];
+      const dt = Math.max((b[2] - a[2]) / 1000, 1 / 120);
+      const speed = gesture.moved < 12 ? 1.2 : Math.hypot(b[0] - a[0], b[1] - a[1]) / dt / window.innerHeight;
+      throwAt(e.clientX, e.clientY, speed);
+    }
+    gesture = null;
+  }
+}
+canvas.addEventListener("pointerup", end);
+canvas.addEventListener("pointercancel", end);
+canvas.addEventListener("wheel", (e) => { e.preventDefault(); view.dist = Math.min(Math.max(view.dist * Math.exp(e.deltaY * 0.001), 0.2), 60); placeCamera(); }, { passive: false });
+function pinchDist() {
+  const [a, b] = [...pointers.values()];
+  return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+}
+
+// ---------------------------------------------------------------- controls
+function buildControls(m) {
+  const row = $("impact");
+  IMPACTS = m.impacts;
+  state.impact = Math.max(0, IMPACTS.findIndex((x) => x.name === "sledgehammer"));
+  // One dropdown, grouped by what kind of thing it is, weakest first in each group.
+  const GROUPS = { blunt: "Blunt (fists, tools, vehicles)", edge: "Blades", pointed: "Bullets and bolts", blast: "Explosives" };
+  for (const kind of ["blunt", "edge", "pointed", "blast"]) {
+    const g = document.createElement("optgroup");
+    g.label = GROUPS[kind];
+    IMPACTS.map((imp, i) => ({ imp, i })).filter(({ imp }) => imp.kind === kind)
+      .sort((a, b) => a.imp.energy - b.imp.energy)
+      .forEach(({ imp, i }) => {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = `${imp.label} · ${energyLabel(imp.energy)}`;
+        o.title = imp.description;
+        g.appendChild(o);
+      });
+    row.appendChild(g);
+  }
+  row.value = String(state.impact);
+  row.addEventListener("change", () => { state.impact = Number(row.value); updateHint(); });
+  const sel = $("target");
+  const objects = document.createElement("optgroup");
+  objects.label = "Ready-made objects";
+  for (const p of m.presets) {
+    const o = document.createElement("option");
+    o.value = `object:${p.name}`; o.textContent = p.label;
+    objects.appendChild(o);
+  }
+  const mats = document.createElement("optgroup");
+  mats.label = "Materials (wall or panel)";
+  for (const name of m.materials) {
+    const o = document.createElement("option");
+    o.value = `material:${name}`; o.textContent = name.replace(/_/g, " ");
+    mats.appendChild(o);
+  }
+  sel.append(mats, objects);
+  sel.value = state.target;
+  sel.addEventListener("change", () => { state.target = sel.value; build(); });
+  $("blast").addEventListener("click", () => sim.postMessage({ type: "blast", imp: state.impact }));
+  const toggle = (id, on) => { $(id).setAttribute("aria-pressed", String(on)); $(id).textContent = on ? "On" : "Off"; };
+  $("soft").addEventListener("click", () => {
+    state.soft = !state.soft;
+    toggle("soft", state.soft);
+    sim.postMessage({ type: "setting", soft: state.soft });
+  });
+  $("slow").addEventListener("click", () => { state.slow = !state.slow; toggle("slow", state.slow); updateStats(); });
+  $("reset").addEventListener("click", () => { state.seed++; build(); closeSettings(); });
+  $("budget").value = String(state.budget);
+  $("budget").addEventListener("change", () => {
+    state.budget = Number($("budget").value);
+    sim.postMessage({ type: "setting", budget: state.budget });
+  });
+  $("detail").value = String(state.detail);
+  $("detail").addEventListener("change", () => { state.detail = Number($("detail").value); build(); });
+  // The settings sheet: opens above the deck, closes on the button, Escape, or a tap on the scene.
+  const open = $("settings-open"), sheet = $("settings");
+  const placeSheet = () => document.documentElement.style.setProperty("--deck-h", `${document.querySelector(".deck").offsetHeight}px`);
+  open.addEventListener("click", () => {
+    placeSheet();
+    sheet.hidden = !sheet.hidden;
+    open.setAttribute("aria-expanded", String(!sheet.hidden));
+  });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
+  window.addEventListener("resize", placeSheet);
+}
+function closeSettings() {
+  $("settings").hidden = true;
+  $("settings-open").setAttribute("aria-expanded", "false");
+}
+
+// ---------------------------------------------------------------- start
+// Threads need a page the browser has isolated (crossOriginIsolated: the demo site sets it up); anywhere else the
+// engine runs on the worker's one thread, still off the page's.
+function onReady(m) {
+  state.threads = m.threads;
+  buildControls(m);
+  updateHint();
+  setupEffects();
+  build();
+  $("version").textContent = `Engine ${m.version} · ${m.threads > 0 ? `simulation thread + ${m.threads} engine threads` : "simulation thread (engine threads need the demo site)"}`;
+  $("loading").hidden = true;
+  ready = true;
+  requestAnimationFrame(frame);
+}
+function failed(message) {
+  $("loading").innerHTML = `The range didn't load<small>${message}</small>`;
+}
+resize();
+note("Loading the engine and physics");
+sim.onerror = (e) => { failed(e.message || "the simulation worker didn't start"); };
+sim.postMessage({ type: "init", phone: PHONE, threaded: self.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined" });
+</script>
