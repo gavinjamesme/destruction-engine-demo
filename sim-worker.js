@@ -20,7 +20,7 @@ const POOL = Math.min(4, Math.max(1, (self.navigator.hardwareConcurrency || 2) -
 let M, world, phys, queue, threads = 0;
 let PHONE = false, HULL_POINTS = 64, COMMAND_BUDGET_MS = 8;
 const L = {};
-const state = { budget: 1, soft: false, detail: 1, scale: 1 };
+const state = { budget: 1, soft: false, detail: 1, scale: 1, hold: -1 };
 // Every object on the range: object id -> { info (its material), label, size, at (where its own origin stands) }.
 const objects = new Map();
 // Chunk and body ids are each object's own, so the maps below key them by object too.
@@ -453,6 +453,8 @@ function makeObject(item, seed) {
     if (item.anchor === undefined && info.pane) anchor = 3;
     else if (item.anchor === undefined && info.sheet) anchor = 2;
   }
+  // The page's Hold setting (free 1, base held 2, pinned 4; -1: as the object was made).
+  if (item.anchor === undefined && state.hold >= 0) anchor = state.hold;
   const custom = kind !== "object" || item.size;
   const o = withString(name, (np) => withString(material, (mp) => withString(preset, (pp) =>
     M._destruct_web_make(world, np, mp, pp, custom ? size[0] : 0, custom ? size[1] : 0, custom ? size[2] : 0, shell, anchor,
@@ -485,7 +487,7 @@ function rangeScale() {
 
 function build(msg) {
   clearScene();
-  state.detail = msg.detail; state.budget = msg.budget; state.soft = msg.soft;
+  state.detail = msg.detail; state.budget = msg.budget; state.soft = msg.soft; state.hold = msg.hold ?? -1;
   M._destruct_world_set_energy_budget(world, state.budget);
   M._destruct_world_set_soft_sim(world, state.soft ? 1 : 0);
   msg.items.forEach((item, i) => makeObject(item, msg.seed + i * 7919));
@@ -496,6 +498,7 @@ function build(msg) {
 
 // One more object beside the others: to the right of whatever is there, a little apart.
 function addItem(msg) {
+  state.hold = msg.hold ?? state.hold;
   const size = itemSize(msg.item);
   let right = -Infinity;
   for (const v of objects.values()) right = Math.max(right, v.at[0] + v.size[0] / 2);

@@ -133,6 +133,8 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
   <div class="sheet-row"><span>Blast wave in front of it all</span><button class="btn" id="blast" type="button">Set off</button></div>
   <div class="sheet-row"><span>Sound</span><button class="btn toggle" id="sound" type="button" aria-pressed="true">On</button></div>
   <div class="sheet-row"><span>Slow motion</span><button class="btn toggle" id="slow" type="button" aria-pressed="false">Off</button></div>
+  <div class="sheet-row"><span>Hold objects</span>
+    <select id="hold" aria-label="Hold objects"><option value="-1">As made</option><option value="1">Free</option><option value="2">Base held</option><option value="4">Pinned</option></select></div>
   <div class="sheet-row"><span>Detail</span>
     <select id="detail" aria-label="Detail"><option value="0">Cheap</option><option value="1">Normal</option><option value="2">Cinematic</option></select></div>
   <div class="sheet-row"><span>How a hit's energy is shared</span>
@@ -170,7 +172,7 @@ const note = (t) => { $("loading-note").textContent = t; };
 
 const sim = new Worker(new URL("sim-worker.js", import.meta.url), { type: "module" });
 const state = {
-  impact: 3, family: 0, preset: 0, force: 1, slow: false, soft: false, breakLines: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
+  impact: 3, family: 0, preset: 0, force: 1, hold: -1, slow: false, soft: false, breakLines: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
   size: [5, 3, 0.6], scale: 1, info: null, loose: 0, threads: 0, counts: { break: 0, crumble: 0, debris_hit: 0, deform: 0 },
 };
 const chunks = new Map();   // chunk id -> { mesh, body }
@@ -427,7 +429,7 @@ const SCENES = {
 function build() {
   const [kind, name] = state.target.split(":");
   const items = kind === "scene" ? SCENES[name].items : [{ target: state.target }];
-  sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
+  sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
 }
 function onBuilt(b) {
   if (b.replaced) {
@@ -1298,7 +1300,7 @@ function buildControls(m) {
   add.value = "";
   add.addEventListener("change", () => {
     if (!add.value) return;
-    sim.postMessage({ type: "add", item: { target: add.value }, seed: state.seed });
+    sim.postMessage({ type: "add", item: { target: add.value }, seed: state.seed, hold: state.hold });
     add.value = "";
   });
   $("blast").addEventListener("click", () => {
@@ -1326,13 +1328,20 @@ function buildControls(m) {
   $("reset-now").addEventListener("click", () => {
     const items = [...onRange.values()].map((v) => v.item);
     if (!items.length) return build();
-    sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft });
+    sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
   });
   $("lines").addEventListener("click", () => { state.breakLines = !state.breakLines; toggle("lines", state.breakLines); retintAll(); refreshMaterials(); });
   $("budget").value = String(state.budget);
   $("budget").addEventListener("change", () => {
     state.budget = Number($("budget").value);
     sim.postMessage({ type: "setting", budget: state.budget });
+  });
+  // Hold objects: as each was made (most stand free or on their base), free, held at the base, or pinned in place
+  // (hits squash, tear and break them instead of knocking them away). Puts everything back, held the new way.
+  $("hold").value = String(state.hold);
+  $("hold").addEventListener("change", () => {
+    state.hold = Number($("hold").value);
+    $("reset-now").click();
   });
   $("detail").value = String(state.detail);
   $("detail").addEventListener("change", () => { state.detail = Number($("detail").value); build(); });
