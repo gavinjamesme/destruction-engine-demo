@@ -9,7 +9,7 @@
 import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js";
 
 const KIND = ["blunt", "edge", "pointed", "blast"];
-const EVENT_NAMES = ["break", "crumble", "debris_hit", "collapsed", "deform"];
+const EVENT_NAMES = ["break", "crumble", "debris_hit", "collapsed", "deform", "crater"];
 const ROUND = new Set(["baseball", "fist", "kick", "baseball_bat", "wrecking_ball", "grenade", "firecracker"]);
 const PANES = new Set(["glass", "mirror"]);
 const SHEETS = new Set(["drywall", "cardboard", "paper", "tile", "sheet_metal", "tin", "leather", "pcb", "tempered_glass", "acrylic", "aluminum_foil"]);
@@ -25,7 +25,7 @@ const state = { budget: 1, soft: false, detail: 1, scale: 1 };
 const objects = new Map();
 // Chunk and body ids are each object's own, so the maps below key them by object too.
 const key = (o, id) => o * 4294967296 + id;
-const IMPACTS = [], MATERIALS = new Map(), PRESETS = new Map();
+const IMPACTS = [], FAMILIES = [], MATERIALS = new Map(), PRESETS = new Map();
 const bodies = new Map();      // key(object, body) -> { rb, object, id, static, reactive, particle, fresh }
 const chunks = new Map();      // key(object, chunk) -> { collider, body (its key), points, mass, ... }
 const byCollider = new Map();  // collider handle -> body key
@@ -122,7 +122,7 @@ async function init(msg) {
   catalog();
   self.postMessage({
     type: "ready", version: str(M._destruct_version()), threads,
-    impacts: IMPACTS, materials: [...MATERIALS.keys()], presets: [...PRESETS].map(([name, p]) => ({ name, label: p.label })),
+    impacts: IMPACTS, families: FAMILIES, materials: [...MATERIALS.keys()], presets: [...PRESETS].map(([name, p]) => ({ name, label: p.label })),
   });
 }
 
@@ -138,6 +138,20 @@ function catalog() {
       description: str(u32(info + 4)) });
   }
   M._free(info);
+  // The short list the demo offers: kinds of hit, each at a few strengths (index into IMPACTS, and a speed scale).
+  const pr = M._malloc(32);
+  for (let f = 0; f < M._destruct_impact_family_count(); f++) {
+    const presets = [];
+    for (let k = 0; k < M._destruct_impact_family_preset_count(f); k++) {
+      if (!M._destruct_impact_family_preset(f, k, pr)) continue;
+      views();
+      const name = str(u32(pr + 4));
+      presets.push({ label: str(u32(pr)), imp: IMPACTS.findIndex((x) => x.name === name), scale: f32(pr + 8), energy: f32(pr + 12) });
+    }
+    FAMILIES.push({ name: str(M._destruct_impact_family_name(f)), label: str(M._destruct_impact_family_label(f)), presets,
+      def: M._destruct_impact_family_default(f) });
+  }
+  M._free(pr);
   for (let i = 0; i < M._destruct_material_count(); i++) {
     const name = str(M._destruct_material_name(i));
     MATERIALS.set(name, { pane: PANES.has(name), sheet: SHEETS.has(name) });
@@ -200,9 +214,10 @@ function chunkGeometry(o, c) {
   return { verts, points, mass, centre, radius: Math.sqrt(r2), size: count ? [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] : [0, 0, 0] };
 }
 
-// Collision groups (membership << 16 | what it collides with). Pieces fresh from a break pass through each other
-// until the engine says they are clear (SetBodyFresh), but still hit the ground and everything settled.
-const SOLID_GROUPS = (0x0001 << 16) | 0xffff, FRESH_GROUPS = (0x0002 << 16) | 0x0001;
+// Collision groups (membership << 16 | what it collides with). Pieces fresh from a break pass through each other and
+// out of the standing structure they broke from until the engine says they are clear (SetBodyFresh), but still hit
+// the ground and everything settled.
+const SOLID_GROUPS = (0x0001 << 16) | 0xffff, FRESH_GROUPS = (0x0002 << 16) | 0x0001, STANDING_GROUPS = (0x0004 << 16) | 0xffff;
 function makeCollider(entry, body) {
   const k0 = performance.now();
   // Particles (tiny debris, removed in a few seconds) get a cheap ball; everything else its convex hull.
@@ -216,7 +231,7 @@ function makeCollider(entry, body) {
   }
   const info = objects.get(body.object).info;
   desc.setMass(Math.max(entry.mass, 0.001)).setFriction(info.friction).setRestitution(info.bounce)
-    .setCollisionGroups(body.fresh ? FRESH_GROUPS : SOLID_GROUPS);
+    .setCollisionGroups(body.static ? STANDING_GROUPS : body.fresh ? FRESH_GROUPS : SOLID_GROUPS);
   if (!body.static && body.reactive && !body.particle) {
     desc.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(5);
   }
@@ -296,8 +311,11 @@ function runCommands() {
           t = like.rb.translation(); q = like.rb.rotation();
           if (!like.static) { v = like.rb.linvel(); w = like.rb.angvel(); }
         }
-        // Air and rough ground take energy out: a little linear damping, more on spin (pieces roll to a stop).
-        const desc = (isStatic ? RAPIER.RigidBodyDesc.fixed() : RAPIER.RigidBodyDesc.dynamic().setLinearDamping(0.02).setAngularDamping(0.6))
+        // Air barely slows a tumbling piece (its drag torque is tiny at these speeds), so pieces keep their spin in flight
+        // and contact friction stops them. Crumbs drawn as balls get more, so they don't roll away like marbles.
+        const crumb = i32(p + L.particle) !== 0;
+        const desc = (isStatic ? RAPIER.RigidBodyDesc.fixed()
+          : RAPIER.RigidBodyDesc.dynamic().setLinearDamping(0.01).setAngularDamping(crumb ? 1.5 : 0.05))
           .setTranslation(t.x, t.y, t.z).setRotation(q);
         const rb = phys.createRigidBody(desc);
         if (!isStatic) {
@@ -551,7 +569,8 @@ function strike(msg) {
   const target = objects.get(msg.o);
   if (!target) return;
   const o = M._malloc(28);
-  withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, 1, o));
+  const force = msg.force || 1;  // the preset's speed scale
+  withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, force, o));
   views();
   const pushed = f32(o + 24) !== 0;
   if (imp.kind === "pointed" || imp.kind === "edge") {
@@ -568,7 +587,7 @@ function strike(msg) {
   const happened = readEvents();
   if (!happened && imp.kind !== "pointed" && imp.kind !== "blast" && !pushed) {
     // Say so, rather than leave the player guessing.
-    out.log = `${imp.label} (${energyLabel(imp.energy)}): no damage. ${target.info.name.replace(/_/g, " ")} is tougher than that; keep hitting it to wear it down`;
+    out.log = `${imp.label} (${energyLabel(imp.energy * force * force)}): no damage. ${target.info.name.replace(/_/g, " ")} is tougher than that; keep hitting it to wear it down`;
   }
   perf.hit = performance.now() - h0;
 }
@@ -579,7 +598,7 @@ function energyLabel(j) {
 function blast(msg) {
   const imp = IMPACTS[msg.imp].kind === "blast" ? IMPACTS[msg.imp] : IMPACTS.find((x) => x.name === "grenade");
   const [x, y, z] = msg.p;
-  M._destruct_web_detonate(world, x, y, z, imp.energy, 6 * Math.max(state.scale, 0.2));
+  M._destruct_web_detonate(world, x, y, z, imp.energy * (msg.force || 1) ** 2, 6 * Math.max(state.scale, 0.2));
   marker("break", x, y, z, 1);
 }
 
@@ -627,7 +646,8 @@ function startSwing(msg) {
     .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
     .setActiveCollisionTypes(RAPIER.ActiveCollisionTypes.DEFAULT | RAPIER.ActiveCollisionTypes.KINEMATIC_FIXED);
   const collider = phys.createCollider(desc, rb);
-  tool = { imp, rb, collider, last: [x, y, z], velocity: [0, 0, 0], lastT: performance.now(), cooldown: new Map(), held: true };
+  tool = { imp, rb, collider, last: [x, y, z], velocity: [0, 0, 0], lastT: performance.now(), cooldown: new Map(), held: true,
+    force: msg.force || 1 };
   projectileColliders.set(collider.handle, tool);
 }
 function moveSwing(msg) {
@@ -670,7 +690,7 @@ function strikeFrom(item, otherHandle, velocity) {
   const o = M._malloc(28);
   if (!body) return;
   withString(item.imp.name, (np) => M._destruct_web_strike(world, body.object, np, at.x, at.y, at.z, rel[0] / speed, rel[1] / speed, rel[2] / speed,
-    closing / item.imp.speed, o));
+    (item.force || 1) * closing / item.imp.speed, o));
   M._free(o);
   marker("debris_hit", at.x, at.y, at.z, 0.2);
   out.log = `${item.imp.label} hit at ${closing.toFixed(1)} m/s (${energyLabel(0.5 * item.imp.mass * closing * closing)})`;

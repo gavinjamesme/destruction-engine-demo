@@ -63,6 +63,7 @@ body { background: #8fb2d6; color: var(--ink); font-family: var(--mono); overflo
   .deck .hint { text-align: left; }
 }
 .field { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.field.force { flex: 0.75 1 0; }
 .field span { font-family: var(--display); font-weight: 600; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
 .btn, select {
   font-family: var(--display); font-weight: 600; font-size: 15px; letter-spacing: 0.04em; text-transform: uppercase;
@@ -108,6 +109,7 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
 <div class="deck">
   <div class="bar">
     <label class="field"><span>Hit with</span><select id="impact" aria-label="What hits it"></select></label>
+    <label class="field force"><span>Force</span><select id="force" aria-label="How hard"></select></label>
     <label class="field"><span>Target</span><select id="target" aria-label="Material or object"></select></label>
   </div>
   <div class="tools">
@@ -155,7 +157,7 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
 
 // What hits things: the engine's impactor library (sent by the worker at start), each a physical thing with a mass
 // and speed.
-let IMPACTS = [];
+let IMPACTS = [], FAMILIES = [];
 function energyLabel(j) {
   return j >= 1e6 ? `${(j / 1e6).toFixed(1)} MJ` : j >= 1000 ? `${(j / 1000).toFixed(j >= 10000 ? 0 : 1)} kJ` : `${j.toFixed(0)} J`;
 }
@@ -168,7 +170,7 @@ const note = (t) => { $("loading-note").textContent = t; };
 
 const sim = new Worker(new URL("sim-worker.js", import.meta.url), { type: "module" });
 const state = {
-  impact: 3, slow: false, soft: false, breakLines: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
+  impact: 3, family: 0, preset: 0, force: 1, slow: false, soft: false, breakLines: false, budget: 1, detail: 1, seed: 1, target: "material:brick",
   size: [5, 3, 0.6], scale: 1, info: null, loose: 0, threads: 0, counts: { break: 0, crumble: 0, debris_hit: 0, deform: 0 },
 };
 const chunks = new Map();   // chunk id -> { mesh, body }
@@ -721,7 +723,10 @@ const wakes = [];
 // Eddies at three sizes (m), each a divergence-free swirl: the curl of A = (sin(ky + a) cos(kz + b), ...).
 const EDDIES = [{ l: 3.0, ph: 0.3 }, { l: 1.0, ph: 2.1 }, { l: 0.35, ph: 4.4 }];
 const AMBIENT_EPS = 2e-4;  // m^2/s^3: a still day outdoors (eddies of 1 m at about 6 cm/s)
-function airAt(x, y, z, out) {
+// `size`: how big the thing riding the air is. Eddies smaller than it don't carry it anywhere (they only spread it,
+// which is its growth), so a dust cloud drifts as a whole with the bigger eddies and spreads evenly instead of
+// being pushed about in blobs.
+function airAt(x, y, z, out, size = 0) {
   out[0] = out[1] = out[2] = 0;
   // How hard the air is being stirred here: the calm background, plus each gust's turbulence (dissipation U^3 / R).
   let eps = AMBIENT_EPS;
@@ -730,7 +735,7 @@ function airAt(x, y, z, out) {
     const dx = x - g.x, dy = y - g.y, dz = z - g.z, d2 = dx * dx + dy * dy + dz * dz;
     const w = Math.exp(-d2 / (r * r));
     if (w < 1e-3) continue;
-    eps += (0.3 * u * u * u / r) * w;
+    eps += (0.1 * u * u * u / r) * w;
     const d = Math.sqrt(d2) || 1, push = u * w;
     out[0] += push * (0.6 * dx / d + 0.4 * g.dir[0]);
     out[1] += push * (0.6 * dy / d + 0.4 * g.dir[1]);
@@ -742,6 +747,7 @@ function airAt(x, y, z, out) {
     out[0] += b.vx * w; out[1] += b.vy * w; out[2] += b.vz * w;
   }
   for (const e of EDDIES) {
+    if (e.l < 2 * size) continue;
     const k = 6.283 / e.l, u = Math.cbrt(eps * e.l);  // Kolmogorov
     const t = fxClock * u / e.l + e.ph;  // each eddy turns over in about l / u
     const px = k * x + 0.7 * t, py = k * y + t, pz = k * z + 1.1 * t;
@@ -909,12 +915,16 @@ function updateEffects(dt) {
     // speed; at the ground the sinking turns into rolling out along it.
     const slow = Math.pow(1 + p.age / p.t0, -0.75);
     const pos = p.sp.position;
-    airAt(pos.x, pos.y, pos.z, airVel);
+    const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * 0.03 * p.age);
+    airAt(pos.x, pos.y, pos.z, airVel, r);
+    // Its grains settle out of it as it hangs there (each falls at its Stokes speed through the cloud's depth), and
+    // faster once it lies on the ground (they deposit), so it thins on its own as well as by spreading.
+    const depth = Math.max(pos.y + r, 2 * r);
+    p.area *= Math.exp(-dt * (p.settle / depth + (pos.y < r ? 0.5 : 0)));
     let vx = p.v0[0] * slow + airVel[0] + p.ground[0];
     let vy = p.v0[1] * slow + airVel[1] - p.settle;
     let vz = p.v0[2] * slow + airVel[2] + p.ground[1];
-    // Grows: its own mixing (radius ~ t^1/4) and the eddies' (sqrt(2 K t), K about 0.03 m^2/s).
-    const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * 0.03 * p.age);
+    // Grows: its own mixing (radius ~ t^1/4) and the eddies' (sqrt(2 K t), K about 0.03 m^2/s): r, above.
     const floor = 0.35 * r;
     if (pos.y + vy * dt < floor) {
       if (vy < 0) {
@@ -922,7 +932,7 @@ function updateEffects(dt) {
         const al = Math.hypot(ax, az);
         if (al < 1e-3) { ax = Math.cos(p.phase); az = Math.sin(p.phase); }
         const n = Math.hypot(ax, az) || 1;
-        p.ground[0] += (ax / n) * -vy * 0.6; p.ground[1] += (az / n) * -vy * 0.6;
+        p.ground[0] += (ax / n) * -vy * 0.3; p.ground[1] += (az / n) * -vy * 0.3;
         p.v0[1] = Math.max(p.v0[1], 0);
       }
       vy = Math.max(vy, (floor - pos.y) / Math.max(dt, 1e-3));
@@ -935,8 +945,10 @@ function updateEffects(dt) {
     // As thick as the dust in it: tau = Q A / (pi r^2); 1 - e^-tau of the light is blocked. Fades in over a few
     // hundredths of a second, and goes once it has thinned to nothing.
     const tau = p.area / (Math.PI * r * r);
-    if ((p.age > 0.3 && tau < 0.01) || p.age > 20) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
-    p.sp.material.opacity = Math.min(0.85, 1 - Math.exp(-tau)) * Math.min(1, p.age * 12);
+    if ((p.age > 0.3 && tau < 0.03) || p.age > 7) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
+    // Fades in over a few hundredths of a second, and out over its last second (by 7 s even a thick one has mostly
+    // settled or spread out of sight on a range this size).
+    p.sp.material.opacity = Math.min(0.85, 1 - Math.exp(-tau)) * Math.min(1, p.age * 12) * Math.min(1, 7 - p.age);
   }
   for (let i = fading.length - 1; i >= 0; i--) {
     const f = fading[i];
@@ -1017,7 +1029,7 @@ function shoot(clientX, clientY) {
   // The impactor arrives along the line of sight. A blast goes off a little in front of the surface.
   const back = imp.kind === "blast" ? 0.6 * Math.max(state.scale, 0.3) : 0;
   const p = hit.point.clone().addScaledVector(d, -back);
-  sim.postMessage({ type: "strike", imp: state.impact, o: hit.object.userData.o, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
+  sim.postMessage({ type: "strike", imp: state.impact, force: state.force, o: hit.object.userData.o, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
 }
 
 // ---------------------------------------------------------------- throwing and swinging
@@ -1102,7 +1114,7 @@ function startSwing(clientX, clientY) {
   tool.mesh.position.copy(p);
   tool.mesh.quaternion.copy(camera.quaternion);
   const q = camera.quaternion;
-  sim.postMessage({ type: "swingStart", imp: state.impact, p: [p.x, p.y, p.z], q: [q.x, q.y, q.z, q.w] });
+  sim.postMessage({ type: "swingStart", imp: state.impact, force: state.force, p: [p.x, p.y, p.z], q: [q.x, q.y, q.z, q.w] });
 }
 function moveSwing(clientX, clientY) {
   if (!tool) return;
@@ -1135,7 +1147,7 @@ function throwAt(clientX, clientY, screensPerSecond) {
   const imp = IMPACTS[state.impact];
   const r = screenRay(clientX, clientY);
   const strength = Math.min(Math.max(screensPerSecond / 2.0, 0.35), 1.8);
-  const speed = imp.kind === "blast" ? 9 * strength : imp.speed * strength;
+  const speed = imp.kind === "blast" ? 9 * strength : imp.speed * strength * state.force;
   const from = camera.position.clone().addScaledVector(r.direction, 0.6).add(new THREE.Vector3(0, -0.15, 0));
   const v = r.direction.clone().multiplyScalar(speed);
   // A little lift so it still reaches the spot it was aimed at after falling on the way.
@@ -1219,27 +1231,40 @@ function pinchDist() {
 
 // ---------------------------------------------------------------- controls
 function buildControls(m) {
-  const row = $("impact");
+  const row = $("impact"), forceRow = $("force");
   IMPACTS = m.impacts;
-  state.impact = Math.max(0, IMPACTS.findIndex((x) => x.name === "sledgehammer"));
-  // One dropdown, grouped by what kind of thing it is, weakest first in each group.
-  const GROUPS = { blunt: "Blunt (fists, tools, vehicles)", edge: "Blades", pointed: "Bullets and bolts", blast: "Explosives" };
-  for (const kind of ["blunt", "edge", "pointed", "blast"]) {
-    const g = document.createElement("optgroup");
-    g.label = GROUPS[kind];
-    IMPACTS.map((imp, i) => ({ imp, i })).filter(({ imp }) => imp.kind === kind)
-      .sort((a, b) => a.imp.energy - b.imp.energy)
-      .forEach(({ imp, i }) => {
-        const o = document.createElement("option");
-        o.value = String(i);
-        o.textContent = `${imp.label} · ${energyLabel(imp.energy)}`;
-        o.title = imp.description;
-        g.appendChild(o);
-      });
-    row.appendChild(g);
-  }
-  row.value = String(state.impact);
-  row.addEventListener("change", () => { state.impact = Number(row.value); updateHint(); });
+  FAMILIES = m.families;
+  // Two dropdowns: what hits it (a short list of kinds), and how hard (each kind's strengths, weakest first).
+  FAMILIES.forEach((f, i) => {
+    const o = document.createElement("option");
+    o.value = String(i);
+    o.textContent = f.label;
+    row.appendChild(o);
+  });
+  const choosePreset = (k) => {
+    const p = FAMILIES[state.family].presets[k];
+    state.preset = k;
+    state.impact = p.imp;
+    state.force = p.scale;
+    forceRow.value = String(k);
+    updateHint();
+  };
+  const chooseFamily = (i) => {
+    state.family = i;
+    row.value = String(i);
+    forceRow.textContent = "";
+    FAMILIES[i].presets.forEach((p, k) => {
+      const o = document.createElement("option");
+      o.value = String(k);
+      o.textContent = `${p.label} · ${energyLabel(p.energy)}`;
+      o.title = IMPACTS[p.imp]?.description || "";
+      forceRow.appendChild(o);
+    });
+    choosePreset(FAMILIES[i].def);
+  };
+  chooseFamily(Math.max(0, FAMILIES.findIndex((f) => f.name === "sledgehammer")));
+  row.addEventListener("change", () => chooseFamily(Number(row.value)));
+  forceRow.addEventListener("change", () => choosePreset(Number(forceRow.value)));
   const sel = $("target");
   const objects = document.createElement("optgroup");
   objects.label = "Ready-made objects";
@@ -1281,7 +1306,7 @@ function buildControls(m) {
     let x = 0, top = 0, front = -Infinity;
     for (const v of onRange.values()) { x += v.at[0]; top = Math.max(top, v.at[1] + v.size[1]); front = Math.max(front, v.at[2] + v.size[2] / 2); }
     x /= Math.max(onRange.size, 1);
-    sim.postMessage({ type: "blast", imp: state.impact, p: [x, top * 0.5, front + Math.max(0.6, top * 0.6)] });
+    sim.postMessage({ type: "blast", imp: state.impact, force: state.force, p: [x, top * 0.5, front + Math.max(0.6, top * 0.6)] });
   });
   const toggle = (id, on) => { $(id).setAttribute("aria-pressed", String(on)); $(id).textContent = on ? "On" : "Off"; };
   $("soft").addEventListener("click", () => {
