@@ -266,7 +266,7 @@ const hiddenMaterial = new THREE.MeshBasicMaterial({ visible: false });
 function chunkMaterials(o, joined) {
   const obj = onRange.get(o);
   const hideInside = joined && obj.info.opacity < 1 && !state.breakLines;
-  return [obj.material, hideInside ? hiddenMaterial : obj.material];
+  return [obj.material, hideInside ? hiddenMaterial : obj.innerMaterial];
 }
 function refreshMaterials() {
   for (const e of chunks.values()) {
@@ -274,11 +274,14 @@ function refreshMaterials() {
     e.mesh.material = chunkMaterials(e.o, !b || b.group.children.length > 1);
   }
 }
-function makeChunkMaterial(info) {
+// inner: for the faces made by breaking, drawn a hair behind the outer surface, so where a dent curves the outer
+// surface sharply the flat break faces just under it never show through as dark slits.
+function makeChunkMaterial(info, inner = false) {
   const o = info.opacity;
   return new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: info.family === "metal" ? 0.35 : 0.85, metalness: info.family === "metal" ? 0.55 : 0,
     transparent: o < 1, opacity: Math.max(o, 0.25), side: o < 1 ? THREE.FrontSide : THREE.DoubleSide,
+    polygonOffset: inner, polygonOffsetFactor: inner ? 4 : 0, polygonOffsetUnits: inner ? 16 : 0,
   });
 }
 
@@ -423,6 +426,7 @@ const SCENES = {
     { target: "object:mattress", at: [0, 0, 0] }, { target: "object:pillow", at: [-0.3, 0.25, -0.5] },
     { target: "object:plush_toy", at: [0.3, 0.25, 0.2] }, { target: "object:jelly", at: [-0.3, 0.25, 0.5] },
     { target: "object:clay_lump", at: [0.4, 0.25, -0.4] }, { target: "object:rubber_ball", at: [-0.1, 0.25, 0.0] },
+    { target: "object:play_doh", at: [0.45, 0.25, 0.35] },
   ] },
 };
 // Asks the worker for the target (one thing, or a scene); it answers with a frame carrying `built`.
@@ -439,7 +443,7 @@ function onBuilt(b) {
     $("log").textContent = " ";
   }
   for (const v of b.objects)
-    if (!onRange.has(v.o)) onRange.set(v.o, { ...v, material: makeChunkMaterial(v.info) });
+    if (!onRange.has(v.o)) onRange.set(v.o, { ...v, material: makeChunkMaterial(v.info), innerMaterial: makeChunkMaterial(v.info, true) });
   state.scale = b.scale;
   // Frame everything: the middle of all the objects, far enough back to see them all (portrait screens see less
   // across, so stand further back).
