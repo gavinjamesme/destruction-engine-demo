@@ -917,7 +917,9 @@ function updateEffects(dt) {
     // speed; at the ground the sinking turns into rolling out along it.
     const slow = Math.pow(1 + p.age / p.t0, -0.75);
     const pos = p.sp.position;
-    const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * 0.03 * p.age);
+    // A break's puff is stirred hard at first (eddy diffusivity K a few tenths of m^2/s, falling to a still day's 0.03
+    // within a second), so it billows out fast and thins: a quick poof, then gone.
+    const r = p.r0 * Math.pow(1 + p.age / p.t0, 0.25) + Math.sqrt(2 * (0.03 * p.age + 0.5 * 0.5 * (1 - Math.exp(-p.age / 0.5))));
     airAt(pos.x, pos.y, pos.z, airVel, r);
     // Its grains settle out of it as it hangs there (each falls at its Stokes speed through the cloud's depth), and
     // faster once it lies on the ground (they deposit), so it thins on its own as well as by spreading.
@@ -947,10 +949,9 @@ function updateEffects(dt) {
     // As thick as the dust in it: tau = Q A / (pi r^2); 1 - e^-tau of the light is blocked. Fades in over a few
     // hundredths of a second, and goes once it has thinned to nothing.
     const tau = p.area / (Math.PI * r * r);
-    if ((p.age > 0.3 && tau < 0.03) || p.age > 7) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
-    // Fades in over a few hundredths of a second, and out over its last second (by 7 s even a thick one has mostly
-    // settled or spread out of sight on a range this size).
-    p.sp.material.opacity = Math.min(0.85, 1 - Math.exp(-tau)) * Math.min(1, p.age * 12) * Math.min(1, 7 - p.age);
+    if ((p.age > 0.2 && tau < 0.05) || p.age > 1.5) { p.sp.parent?.remove(p.sp); puffPool.push(p.sp); puffs.splice(i, 1); continue; }
+    // Fades in over a few hundredths of a second and out over its last 0.6 s; even a thick cloud is gone by 1.5 s.
+    p.sp.material.opacity = Math.min(0.85, 1 - Math.exp(-tau)) * Math.min(1, p.age * 12) * Math.min(1, (1.5 - p.age) / 0.6);
   }
   for (let i = fading.length - 1; i >= 0; i--) {
     const f = fading[i];
