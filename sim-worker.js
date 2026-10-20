@@ -612,7 +612,7 @@ function strike(msg) {
   if (!target) return;
   const o = M._malloc(28);
   const force = msg.force || 1;  // the preset's speed scale
-  withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, force, o));
+  withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, force, 0, o));
   views();
   const pushed = f32(o + 24) !== 0;
   if (imp.kind === "pointed" || imp.kind === "edge") {
@@ -731,8 +731,9 @@ function strikeFrom(item, otherHandle, velocity) {
   const at = point || item.rb.translation();
   const o = M._malloc(28);
   if (!body) return;
+  // (Rapier already bounced it off: the engine only does the damage, no push of its own.)
   withString(item.imp.name, (np) => M._destruct_web_strike(world, body.object, np, at.x, at.y, at.z, rel[0] / speed, rel[1] / speed, rel[2] / speed,
-    (item.force || 1) * closing / item.imp.speed, o));
+    (item.force || 1) * closing / item.imp.speed, 1, o));
   M._free(o);
   marker("debris_hit", at.x, at.y, at.z, 0.2);
   out.log = `${item.imp.label} hit at ${closing.toFixed(1)} m/s (${energyLabel(0.5 * item.imp.mass * closing * closing)})`;
