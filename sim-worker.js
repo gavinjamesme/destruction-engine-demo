@@ -255,6 +255,42 @@ function keepGeometry(entry, g) {
 // the rest wait for the next steps, so a grenade costs a few steps of a little work instead of one long stall.
 let queued = new Uint8Array(0);
 const queueBuf = { ptr: 0, bytes: 0 };
+// A spinning body's pieces each move as their own point of it did: its velocity plus its spin times their offset
+// from its centre of mass (docs/CODEBASE_REVIEW.md, R1). Rapier keeps a body's centre velocity when its mass changes
+// and a new body only copies the velocity it is given, so the spin's share is added once the queue is drained (the
+// bodies have all their pieces by then).
+const spinFix = new Map();  // body key -> { com: [x, y, z] (world, before), w: {x, y, z} }
+function bodyCom(bodyKey, rb) {
+  let m = 0, x = 0, y = 0, z = 0;
+  for (const e of chunks.values()) {
+    if (e.body !== bodyKey || !e.centre) continue;
+    const k = Math.max(e.mass || 0, 1e-6);
+    m += k; x += k * e.centre[0]; y += k * e.centre[1]; z += k * e.centre[2];
+  }
+  if (m <= 0) return null;
+  // Object space (the body's own frame) to world: rotate by its orientation (v + 2w(q x v) + 2q x (q x v)), then move.
+  const q = rb.rotation(), t = rb.translation(), px = x / m, py = y / m, pz = z / m;
+  const tx = 2 * (q.y * pz - q.z * py), ty = 2 * (q.z * px - q.x * pz), tz = 2 * (q.x * py - q.y * px);
+  return [t.x + px + q.w * tx + (q.y * tz - q.z * ty), t.y + py + q.w * ty + (q.z * tx - q.x * tz), t.z + pz + q.w * tz + (q.x * ty - q.y * tx)];
+}
+function noteSpin(bodyKey, from) {  // remember where `from` (a body or the one a new body comes from) was centred
+  if (spinFix.has(bodyKey) || !from || from.static) return;
+  const w = from.rb.angvel();
+  if (w.x * w.x + w.y * w.y + w.z * w.z < 1e-6) return;
+  const com = bodyCom(from.key ?? bodyKey, from.rb);
+  if (com) spinFix.set(bodyKey, { com, w });
+}
+function applySpinFix() {
+  for (const [bodyKey, s] of spinFix) {
+    const b = bodies.get(bodyKey);
+    if (!b || b.static) continue;
+    const now = bodyCom(bodyKey, b.rb);
+    if (!now) continue;
+    const r = [now[0] - s.com[0], now[1] - s.com[1], now[2] - s.com[2]], w = s.w, v = b.rb.linvel();
+    b.rb.setLinvel({ x: v.x + w.y * r[2] - w.z * r[1], y: v.y + w.z * r[0] - w.x * r[2], z: v.z + w.x * r[1] - w.y * r[0] }, true);
+  }
+  spinFix.clear();
+}
 function runCommands() {
   const taken = M._destruct_take_commands(world);
   views();
@@ -324,12 +360,14 @@ function runCommands() {
         }
         bodies.set(body, { rb, object: o, id, static: isStatic, reactive: i32(p + L.reactive) !== 0, particle: i32(p + L.particle) !== 0,
           fresh: !isStatic && i32(p + L.flag) !== 0 });
+        if (like && !isStatic) noteSpin(body, { ...like, key: key(o, u64(p + L.placeLike)) });
         out.ops.push({ op: "body", id: body, o, static: isStatic, pose: [t.x, t.y, t.z, q.x, q.y, q.z, q.w] });
         break;
       }
       case 3: {  // AttachChunk
         const e = chunks.get(c), b = bodies.get(body);
         if (!e || !b) break;
+        if (e.body && e.body !== body) { const was = bodies.get(e.body); if (was) noteSpin(e.body, { ...was, key: e.body }); }
         dropCollider(e);
         e.body = body;
         e.collider = makeCollider(e, b);
@@ -376,6 +414,7 @@ function runCommands() {
     }
   }
   queued = queued.slice(done * L.cmd);
+  if (queued.length === 0) applySpinFix();
 }
 
 function readEvents() {
