@@ -29,7 +29,9 @@ const IMPACTS = [], FAMILIES = [], MATERIALS = new Map(), PRESETS = new Map();
 const bodies = new Map();      // key(object, body) -> { rb, object, id, static, reactive, particle, fresh }
 const chunks = new Map();      // key(object, chunk) -> { collider, body (its key), points, mass, ... }
 const byCollider = new Map();  // collider handle -> body key
-const perf = { steps: 0, physics: 0, engine: 0, commands: 0, geometry: 0, colliders: 0, chunkMeshes: 0, worstStep: 0, hit: 0 };
+const perf = { steps: 0, physics: 0, engine: 0, commands: 0, geometry: 0, colliders: 0, chunkMeshes: 0, worstStep: 0, hit: 0,
+  jolts: 0, joltMax: 0 };
+let watchJolts = false;  // testing: count settled pieces jolted (perf.jolts)
 
 // ---------------------------------------------------------------- the engine's memory
 // Views over the wasm heap, made again when it grows (with threads, any thread can grow it).
@@ -152,6 +154,10 @@ function catalog() {
       def: M._destruct_impact_family_default(f) });
   }
   M._free(pr);
+  // A shell is nine pellets, not a stronger single bullet. Keep this demo choice separate from impactor presets.
+  const buckshot = IMPACTS.findIndex((x) => x.name === "buckshot_pellet");
+  if (buckshot >= 0) FAMILIES.push({ name: "shotgun", label: "Shotgun", def: 0,
+    presets: [{ label: "00 buckshot · 9 pellets", imp: buckshot, scale: 1, energy: 9 * IMPACTS[buckshot].energy }] });
   for (let i = 0; i < M._destruct_material_count(); i++) {
     const name = str(M._destruct_material_name(i));
     MATERIALS.set(name, { pane: PANES.has(name), sheet: SHEETS.has(name) });
@@ -556,26 +562,46 @@ function step(dt) {
     if (b.static) continue;
     const density = Math.max(objects.get(b.object)?.info.density || 1000, 1);
     const v = b.rb.linvel(), speed = Math.hypot(v.x, v.y, v.z);
+    b.pre = [v.x, v.y, v.z];  // how fast it was going into this step (what a contact closes with, below)
     if (speed < 0.01) continue;
     const m = Math.max(b.rb.mass(), 1e-4), area = Math.pow(m / density, 2 / 3);
     const dv = Math.min(0.5 * 1.2 * 1.05 * area * speed * speed / m * dt, speed);
     const k = 1 - dv / speed;
     b.rb.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, false);
+    b.pre = [v.x * k, v.y * k, v.z * k];
   }
   phys.timestep = dt;
   let t0 = performance.now();
   for (const item of thrown) { const v = item.rb.linvel(); item.prevVel = [v.x, v.y, v.z]; }  // how fast each was going into this step
+  if (watchJolts) for (const b of bodies.values()) if (!b.static) { const v = b.rb.linvel(); b.v0 = Math.hypot(v.x, v.y, v.z); }
   phys.step(queue);
+  if (watchJolts) {
+    // A piece lying still (under 5 cm/s) going faster than 1 m/s after one step: a jolt.
+    for (const b of bodies.values()) {
+      if (b.static || !(b.v0 < 0.05)) continue;
+      const v = b.rb.linvel(), s = Math.hypot(v.x, v.y, v.z);
+      if (s > 1) perf.jolts++, perf.joltMax = Math.max(perf.joltMax, s);
+    }
+  }
   updateProjectiles(dt);
   perf.physics += performance.now() - t0;
+  // How hard pieces hit: from how fast the two were closing along the contact before the step, 1/2 mu v^2 (the same
+  // measure the engine's own physics reports). Not from the contact force: that also counts a piece's resting weight
+  // and the solver pushing apart pieces that overlap, which made settled rubble "hit" itself and break again.
   queue.drainContactForceEvents((ev) => {
-    const mag = ev.totalForceMagnitude();
-    for (const h of [ev.collider1(), ev.collider2()]) {
-      const id = byCollider.get(h), b = id && bodies.get(id);
+    const ends = [ev.collider1(), ev.collider2()].map((h) => { const id = byCollider.get(h); return id && bodies.get(id); });
+    const vel = (b) => (b && !b.static && b.pre) || [0, 0, 0];
+    const mass = (b) => (b && !b.static ? Math.max(b.rb.mass(), 0.01) : Infinity);
+    const va = vel(ends[0]), vb = vel(ends[1]), n = ev.maxForceDirection();
+    const rel = [va[0] - vb[0], va[1] - vb[1], va[2] - vb[2]];
+    const nl = Math.hypot(n.x, n.y, n.z);
+    const closing = nl > 1e-6 ? Math.abs((rel[0] * n.x + rel[1] * n.y + rel[2] * n.z) / nl) : Math.hypot(rel[0], rel[1], rel[2]);
+    const ma = mass(ends[0]), mb = mass(ends[1]);
+    const mu = ma === Infinity ? mb : mb === Infinity ? ma : (ma * mb) / (ma + mb);
+    const energy = 0.5 * mu * closing * closing;
+    if (!(energy >= 20)) return;
+    for (const b of ends) {
       if (!b || b.static || !b.reactive) continue;
-      const m = b.rb.mass();
-      const impulse = mag * dt, energy = (impulse * impulse) / (2 * Math.max(m, 0.01));
-      if (energy < 20) continue;
       const t = b.rb.translation();
       M._destruct_web_contact(world, b.object, b.id, t.x, t.y, t.z, energy);
     }
@@ -605,6 +631,30 @@ function step(dt) {
 }
 
 // ---------------------------------------------------------------- hitting things
+function spread(msg) {
+  const imp = IMPACTS.find((x) => x.name === "buckshot_pellet");
+  const pellets = 9, output = M._malloc(pellets * 6 * 4);
+  if (!output) throw new Error("Could not allocate shotgun results");
+  try {
+    const n = M._destruct_web_shoot_spread(world, ...msg.from, ...msg.d, imp.energy, 0.0042, 200,
+      imp.mass * imp.speed, pellets, 2, msg.seedLo >>> 0, msg.seedHi >>> 0, output, pellets);
+    if (n < 0) throw new Error("Invalid shotgun shot");
+    views();
+    let hit = 0;
+    for (let i = 0; i < n; ++i) {
+      const p = output + i * 24;
+      if (f32(p + 20) > 0) {
+        hit++;
+        marker("debris_hit", f32(p + 4), f32(p + 8), f32(p + 12), 0.25);
+      }
+    }
+    runCommands();
+    readEvents();
+    readEffects();
+    out.log = `Shotgun: ${hit}/${n} pellets hit · 280 J each · 2° spread`;
+  } finally { M._free(output); }
+}
+
 function strike(msg) {
   const h0 = performance.now();
   const imp = IMPACTS[msg.imp], [px, py, pz] = msg.p, [dx, dy, dz] = msg.d;
@@ -781,6 +831,7 @@ const handlers = {
     flush({ stepped: msg.n });
   },
   strike,
+  spread,
   blast,
   throw: throwImpactor,
   swingStart: startSwing,
@@ -795,6 +846,7 @@ const handlers = {
     }
   },
   resetPerf() { for (const k of Object.keys(perf)) perf[k] = 0; },
+  watchJolts() { watchJolts = true; },
 };
 // One message at a time, in order (init is async: everything after it waits for it).
 let chain = Promise.resolve();

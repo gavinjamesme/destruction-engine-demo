@@ -477,6 +477,7 @@ window.rangePerf = perf;
 window.rangeResetPerf = () => { for (const k of Object.keys(perf)) perf[k] = 0; sim.postMessage({ type: "resetPerf" }); };
 window.rangeLook = (yaw, pitch, dist) => { view.yaw = yaw; view.pitch = pitch; if (dist) view.dist = dist; placeCamera(); };  // testing
 window.rangeCounts = () => ({ pieces: chunks.size, bodies: bodies.size, objects: onRange.size, loose: state.loose });  // testing
+window.rangeWatchJolts = () => sim.postMessage({ type: "watchJolts" });  // testing: perf.jolts counts settled pieces jolted
 window.rangeThreads = (n) => sim.postMessage({ type: "setting", threads: n });  // profiling: engine threads (0 = none)
 window.rangeShootAt = (nx, ny) => {  // a tap at a fraction of the canvas (profiling)
   const r = renderer.domElement.getBoundingClientRect();
@@ -1025,14 +1026,22 @@ function updateStats() {
 
 // ---------------------------------------------------------------- hitting things
 const ray = new THREE.Raycaster();
+let spreadSequence = 0;
 function shoot(clientX, clientY) {
   const ndc = new THREE.Vector2((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
   ray.setFromCamera(ndc, camera);
+  const imp = IMPACTS[state.impact], d = ray.ray.direction;
+  if (imp.name === "buckshot_pellet") {
+    // Fire even when the centre ray misses: pellets at the edge of the cone can still hit.
+    const p = ray.ray.origin;
+    sim.postMessage({ type: "spread", from: [p.x, p.y, p.z], d: [d.x, d.y, d.z],
+      seedLo: spreadSequence++ >>> 0, seedHi: state.seed >>> 0 });
+    return;
+  }
   const meshes = [];
   for (const e of chunks.values()) if (e.mesh.parent) meshes.push(e.mesh);
   const hit = ray.intersectObjects(meshes, false)[0];
   if (!hit) return;
-  const imp = IMPACTS[state.impact], d = ray.ray.direction;
   // The impactor arrives along the line of sight. A blast goes off a little in front of the surface.
   const back = imp.kind === "blast" ? 0.6 * Math.max(state.scale, 0.3) : 0;
   const p = hit.point.clone().addScaledVector(d, -back);
