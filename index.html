@@ -221,12 +221,12 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------- chunk meshes
 // The engine's finished vertex buffer (position, normal, uv and a tag per vertex) arrives from the worker; this only
 // tints it and passes it to the GPU.
-function chunkGeometry(c, o, verts) {
+function chunkGeometry(c, o, verts, frag) {
   const g0 = performance.now();
   perf.chunkMeshesDrawn++;
   const count = verts.length / 9;
   const col = new Float32Array(count * 3);
-  tintChunk(c, verts, col, onRange.get(o).info);
+  tintChunk(c, verts, col, onRange.get(o).info, frag);
   const inter = new THREE.InterleavedBuffer(verts, 9);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.InterleavedBufferAttribute(inter, 3, 0));
@@ -241,20 +241,27 @@ function chunkGeometry(c, o, verts) {
   perf.upload += performance.now() - g0;
   return geo;
 }
-// An intact object is one colour all over (players never see where it will break); faces made by breaking are
-// darker. With "show break lines" on, each piece gets its own shade, so developers can see the pattern.
-function tintChunk(c, verts, col, info) {
-  const tint = info.tint, shade = 0.42;
+// An intact object is one colour all over (players never see where it will break); faces made by breaking show the
+// fresh material under the surface (the engine's break colour: brick brighter orange, concrete lighter grey, wood
+// pale, glass frosted white). With "show break lines" on, each piece gets its own shade, so developers can see the
+// pattern.
+// Walls laid from units (brick, cinder block) come apart at their mortar joints first: a whole unit's faces are
+// its own fired surface with mortar left on (a greyer tint), and only a unit that cracked (a fragment) shows fresh
+// material.
+const JOINTED = new Set(["brick", "cinder_block"]);
+function tintChunk(c, verts, col, info, frag) {
+  const tint = info.tint, mortar = tint.map((x, i) => 0.45 * x + 0.55 * [0.62, 0.6, 0.56][i]);
+  const fresh = JOINTED.has(info.name) && !frag ? mortar : info.breakTint || tint.map((x) => x * 0.42);
   const tone = state.breakLines ? 0.8 + 0.4 * (((c * 2654435761) >>> 0) % 1000) / 1000 : 1;
   for (let v = 0, count = verts.length / 9; v < count; v++) {
-    const k = verts[v * 9 + 8] === 0 ? shade : tone;
-    col[v * 3] = tint[0] * k; col[v * 3 + 1] = tint[1] * k; col[v * 3 + 2] = tint[2] * k;
+    const broken = verts[v * 9 + 8] === 0, from = broken ? fresh : tint, k = broken ? 1 : tone;
+    col[v * 3] = from[0] * k; col[v * 3 + 1] = from[1] * k; col[v * 3 + 2] = from[2] * k;
   }
 }
 function retintAll() {
   for (const [c, e] of chunks) {
     const geo = e.mesh.geometry, col = geo.attributes.color;
-    tintChunk(c, geo.attributes.position.data.array, col.array, onRange.get(e.o).info);
+    tintChunk(c, geo.attributes.position.data.array, col.array, onRange.get(e.o).info, e.frag);
     col.needsUpdate = true;
   }
 }
@@ -262,16 +269,18 @@ function retintAll() {
 const onRange = new Map();
 const hiddenMaterial = new THREE.MeshBasicMaterial({ visible: false });
 // See-through objects (glass, clear plastic, jelly) would show where their pieces meet inside: those faces stay hidden
-// while a piece is still joined to others in one body, and show once it is on its own (or with "show break lines").
-function chunkMaterials(o, joined) {
+// while a piece the object was built with is still joined to others in one body (the intact object never shows where
+// it will break). Pieces a hit cut (frag) show them: frosted white cracks, like a shot window's. On its own (or with
+// "show break lines") every piece shows them.
+function chunkMaterials(o, joined, frag) {
   const obj = onRange.get(o);
-  const hideInside = joined && obj.info.opacity < 1 && !state.breakLines;
+  const hideInside = joined && !frag && obj.info.opacity < 1 && !state.breakLines;
   return [obj.material, hideInside ? hiddenMaterial : obj.innerMaterial];
 }
 function refreshMaterials() {
   for (const e of chunks.values()) {
     const b = bodies.get(e.body);
-    e.mesh.material = chunkMaterials(e.o, !b || b.group.children.length > 1);
+    e.mesh.material = chunkMaterials(e.o, !b || b.group.children.length > 1, e.frag);
   }
 }
 // inner: for the faces made by breaking, drawn a hair behind the outer surface, so where a dent curves the outer
@@ -280,7 +289,8 @@ function makeChunkMaterial(info, inner = false) {
   const o = info.opacity;
   return new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: info.family === "metal" ? 0.35 : 0.85, metalness: info.family === "metal" ? 0.55 : 0,
-    transparent: o < 1, opacity: Math.max(o, 0.25), side: o < 1 ? THREE.FrontSide : THREE.DoubleSide,
+    // (A see-through material's cracks are frosted: nearly opaque white where it broke.)
+    transparent: o < 1, opacity: inner && o < 1 ? 0.8 : Math.max(o, 0.25), side: o < 1 ? THREE.FrontSide : THREE.DoubleSide,
     polygonOffset: inner, polygonOffsetFactor: inner ? 4 : 0, polygonOffsetUnits: inner ? 16 : 0,
   });
 }
@@ -291,11 +301,11 @@ function applyOps(ops) {
   for (const o of ops) {
     switch (o.op) {
       case "add": {
-        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.o, o.verts), chunkMaterials(o.o, true));
+        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.o, o.verts, o.frag), chunkMaterials(o.o, true, o.frag));
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.chunk = o.c;
         mesh.userData.o = o.o;
-        chunks.set(o.c, { mesh, body: 0, o: o.o });
+        chunks.set(o.c, { mesh, body: 0, o: o.o, frag: o.frag });
         break;
       }
       case "retire": {
@@ -335,7 +345,7 @@ function applyOps(ops) {
         const e = chunks.get(o.c);
         if (!e) break;
         e.mesh.geometry.dispose();
-        e.mesh.geometry = chunkGeometry(o.c, e.o, o.verts);
+        e.mesh.geometry = chunkGeometry(o.c, e.o, o.verts, e.frag);
         break;
       }
     }
@@ -477,6 +487,13 @@ window.rangePerf = perf;
 window.rangeResetPerf = () => { for (const k of Object.keys(perf)) perf[k] = 0; sim.postMessage({ type: "resetPerf" }); };
 window.rangeLook = (yaw, pitch, dist) => { view.yaw = yaw; view.pitch = pitch; if (dist) view.dist = dist; placeCamera(); };  // testing
 window.rangeCounts = () => ({ pieces: chunks.size, bodies: bodies.size, objects: onRange.size, loose: state.loose });  // testing
+// testing: how many chunks each loose piece holds (several = a section of the object still in one piece)
+window.rangeBodySizes = () => {
+  const n = new Map();
+  for (const e of chunks.values()) { const b = bodies.get(e.body); if (e.mesh.parent && b && !b.static) n.set(e.body, (n.get(e.body) || 0) + 1); }
+  const sizes = [...n.values()];
+  return { loose: sizes.length, sections: sizes.filter((k) => k > 1).length, inSections: sizes.filter((k) => k > 1).reduce((a, k) => a + k, 0), biggest: Math.max(0, ...sizes) };
+};
 window.rangeWatchJolts = () => sim.postMessage({ type: "watchJolts" });  // testing: perf.jolts counts settled pieces jolted
 window.rangeThreads = (n) => sim.postMessage({ type: "setting", threads: n });  // profiling: engine threads (0 = none)
 window.rangeShootAt = (nx, ny) => {  // a tap at a fraction of the canvas (profiling)
@@ -644,7 +661,7 @@ function playSound(type, x, y, z, family, mass, energy) {
 //    is as thick as the dust in it: optical depth tau = Q A / (pi r^2), the grains' cross-section A = 1.5 m / (rho d)
 //    over the cloud's area (Beer-Lambert), so a pinch of dust is a faint wisp and a collapse a thick cloud, and each
 //    thins and fades as it spreads.
-const FX = { DUST: 0, GRIT: 1, SPARKS: 2, SPLINTERS: 3, SHARDS: 4 };
+const FX = { DUST: 0, GRIT: 1, SPARKS: 2, SPLINTERS: 3, SHARDS: 4, SPALL: 5, SCORCH: 6, PAINT_CHIP: 7 };
 const FX_MAX = PHONE ? 900 : 2500, PUFF_MAX = PHONE ? 60 : 160, PER_EFFECT = PHONE ? 160 : 400;
 const AIR = { rho: 1.2, mu: 1.81e-5, g: 9.81 };  // sea-level air: density kg/m^3, viscosity Pa s
 // Per kind: grain density (kg/m^3), drag coefficient and bounce.
@@ -782,13 +799,99 @@ function updateWakes() {
   if (wakes.length > 12) { wakes.sort((a, b) => b.s - a.s); wakes.length = 12; }
 }
 
+// ---------------------------------------------------------------- marks
+// The engine's marks (a light patch of fresh material round a bullet crater, bare metal where a round blasted the
+// paint off, scorch round a charge) are decals: projected onto every piece they cover and carried by it, so a
+// scorched brick that flies off takes its scorch along. The images are drawn once here.
+// The decal projector (three.js r128 examples), fetched in the background: marks need it, nothing else waits on it.
+{
+  const tag = document.createElement("script");
+  tag.crossOrigin = "anonymous";
+  tag.src = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/DecalGeometry.js";
+  document.head.appendChild(tag);
+}
+const MARK_TEX = {};
+function markTexture(kind) {
+  if (MARK_TEX[kind]) return MARK_TEX[kind];
+  const n = 128, cv = document.createElement("canvas");
+  cv.width = cv.height = n;
+  const g = cv.getContext("2d"), img = g.createImageData(n, n);
+  let seed = 7 + kind;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const lobes = Array.from({ length: 9 }, () => 0.75 + 0.25 * rand());  // a ragged edge
+  const rays = Array.from({ length: 23 }, () => [rand() * Math.PI * 2, 0.5 + 0.5 * rand()]);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const dx = (x + 0.5) / n * 2 - 1, dy = (y + 0.5) / n * 2 - 1, r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+      const t = ((a / (Math.PI * 2) + 1) % 1) * lobes.length, i = Math.floor(t), f = t - i;
+      const edge = lobes[i] * (1 - f) + lobes[(i + 1) % lobes.length] * f;
+      let alpha = 0, shade = 1;
+      if (kind === FX.SCORCH) {
+        alpha = Math.max(0, 1 - r / edge) ** 0.7 * (0.75 + 0.25 * rand());
+      } else if (kind === FX.PAINT_CHIP) {
+        let ray = 0;
+        for (const [ra, len] of rays) ray = Math.max(ray, Math.max(0, Math.cos(a - ra)) ** 60 * (r < len ? 1 : 0));
+        alpha = r < 0.35 * edge ? 1 : r < edge ? ray : 0;
+        shade = r < 0.08 ? 0.35 : 1;  // the pit
+      } else {
+        alpha = r < 0.8 * edge ? 1 : r < edge ? 1 - (r - 0.8 * edge) / (0.2 * edge) : 0;
+        alpha *= 0.85 + 0.15 * rand();
+        shade = r < 0.25 ? 0.55 + 1.8 * r : 1;  // the crater's shadowed middle
+      }
+      const k = (y * n + x) * 4, v = Math.round(255 * shade);
+      img.data[k] = img.data[k + 1] = img.data[k + 2] = v;
+      img.data[k + 3] = Math.round(255 * Math.min(1, Math.max(0, alpha)));
+    }
+  g.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  MARK_TEX[kind] = tex;
+  return tex;
+}
+const marks = [];  // the decals, oldest first (at most MARKS_MAX)
+const MARKS_MAX = PHONE ? 120 : 400;
+let marksAsked = 0;
+window.rangeMarks = () => ({ asked: marksAsked, drawn: marks.length });  // testing
+function addMark(kind, at, normal, radius, color) {
+  ++marksAsked;
+  if (!THREE.DecalGeometry || !(radius > 0)) return;
+  const pos = new THREE.Vector3(...at), n = new THREE.Vector3(...normal).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.random() * Math.PI * 2));
+  const orientation = new THREE.Euler().setFromQuaternion(q);
+  const depth = kind === FX.SCORCH ? Math.min(radius, 0.25) : Math.min(2 * radius, 0.1);
+  const size = new THREE.Vector3(2 * radius, 2 * radius, depth);
+  const material = new THREE.MeshStandardMaterial({
+    map: markTexture(kind), color: new THREE.Color(...color), transparent: true, depthWrite: false,
+    roughness: kind === FX.PAINT_CHIP ? 0.35 : 0.95, metalness: kind === FX.PAINT_CHIP ? 0.6 : 0,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  const sphere = new THREE.Sphere(), reach = radius + depth;
+  for (const e of chunks.values()) {
+    const mesh = e.mesh;
+    if (!mesh.parent) continue;
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+    sphere.copy(mesh.geometry.boundingSphere).applyMatrix4(mesh.matrixWorld);
+    if (sphere.center.distanceTo(pos) > sphere.radius + reach) continue;
+    const geo = new THREE.DecalGeometry(mesh, pos, orientation, size);
+    if (!geo.attributes.position || geo.attributes.position.count === 0) { geo.dispose(); continue; }
+    geo.applyMatrix4(mesh.matrixWorld.clone().invert());  // carried by the piece from now on
+    const decal = new THREE.Mesh(geo, material);
+    decal.renderOrder = 1;
+    mesh.add(decal);
+    marks.push(decal);
+  }
+  while (marks.length > MARKS_MAX) { const old = marks.shift(); old.parent?.remove(old); old.geometry.dispose(); }
+}
+
 function readEffects(fx) {
   for (let p = 0; p + 16 <= fx.length; p += 16) {
     const kind = fx[p], count = fx[p + 1];
     const at = [fx[p + 2], fx[p + 3], fx[p + 4]], dir = [fx[p + 5], fx[p + 6], fx[p + 7]];
     const spread = fx[p + 8], size = fx[p + 9], speed = fx[p + 10], life = fx[p + 11];
     const color = [fx[p + 12], fx[p + 13], fx[p + 14]], mass = fx[p + 15];
-    if (kind === FX.DUST) {
+    if (kind === FX.SPALL || kind === FX.SCORCH || kind === FX.PAINT_CHIP) {
+      addMark(kind, at, dir, size, color);
+    } else if (kind === FX.DUST) {
       // The air rushes out with the dust; then the dust goes where the air goes.
       addGust(at, dir, Math.max(speed, 0.5), Math.max(size, 0.1));
       for (let k = 0; k < Math.min(count, 6); k++) spawnPuff(at, dir, spread, size, speed, mass / count, color);

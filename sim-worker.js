@@ -29,6 +29,7 @@ const IMPACTS = [], FAMILIES = [], MATERIALS = new Map(), PRESETS = new Map();
 const bodies = new Map();      // key(object, body) -> { rb, object, id, static, reactive, particle, fresh }
 const chunks = new Map();      // key(object, chunk) -> { collider, body (its key), points, mass, ... }
 const byCollider = new Map();  // collider handle -> body key
+const chunkOfCollider = new Map();  // collider handle -> its chunk (where a contact touched)
 const perf = { steps: 0, physics: 0, engine: 0, commands: 0, geometry: 0, colliders: 0, chunkMeshes: 0, worstStep: 0, hit: 0,
   jolts: 0, joltMax: 0 };
 let watchJolts = false;  // testing: count settled pieces jolted (perf.jolts)
@@ -176,12 +177,14 @@ function catalog() {
 }
 
 function materialInfo(object) {
-  const p = M._malloc(64);
+  const p = M._malloc(80);
   M._destruct_object_material(world, object, p);
+  M._destruct_object_break_tint(world, object, p + 64);  // the color of fresh breaks (faces breaking makes, marks)
   views();
   const info = {
     name: str(u32(p)), family: str(u32(p + 4)), density: f32(p + 8), friction: f32(p + 12), bounce: f32(p + 16), opacity: f32(p + 28),
     tint: [f32(p + 36), f32(p + 40), f32(p + 44)], yieldPa: f32(p + 48), wobble: f32(p + 56),
+    breakTint: [f32(p + 64), f32(p + 68), f32(p + 72)],
   };
   M._free(p);
   return info;
@@ -243,12 +246,14 @@ function makeCollider(entry, body) {
   }
   const collider = phys.createCollider(desc, body.rb);
   byCollider.set(collider.handle, entry.body);
+  chunkOfCollider.set(collider.handle, entry);
   perf.colliders += performance.now() - k0;
   return collider;
 }
 function dropCollider(entry) {
   if (!entry.collider) return;
   byCollider.delete(entry.collider.handle);
+  chunkOfCollider.delete(entry.collider.handle);
   if (phys.getCollider(entry.collider.handle)) phys.removeCollider(entry.collider, true);
   entry.collider = null;
 }
@@ -330,7 +335,8 @@ function runCommands() {
         const e = { collider: null, body: 0 };
         keepGeometry(e, g);
         chunks.set(c, e);
-        out.ops.push({ op: "add", c, o, verts: g.verts });
+        // frag: cut from another chunk by a hit (not one the object was built with)
+        out.ops.push({ op: "add", c, o, verts: g.verts, frag: u32(p + L.source) !== 0xFFFFFFFF });
         out.transfer.push(g.verts.buffer);
         break;
       }
@@ -463,7 +469,7 @@ function readEffects() {
 // The range holds one or more objects: a scene (build) replaces them all, add puts one more beside them.
 function clearScene() {
   for (const b of bodies.values()) phys.removeRigidBody(b.rb);
-  bodies.clear(); chunks.clear(); byCollider.clear();
+  bodies.clear(); chunks.clear(); byCollider.clear(); chunkOfCollider.clear();
   for (const o of objects.keys()) M._destruct_remove_object(world, o);
   objects.clear();
   M._destruct_take_commands(world);
@@ -600,11 +606,22 @@ function step(dt) {
     const mu = ma === Infinity ? mb : mb === Infinity ? ma : (ma * mb) / (ma + mb);
     const energy = 0.5 * mu * closing * closing;
     if (!(energy >= 20)) return;
-    for (const b of ends) {
-      if (!b || b.static || !b.reactive) continue;
-      const t = b.rb.translation();
-      M._destruct_web_contact(world, b.object, b.id, t.x, t.y, t.z, energy);
-    }
+    // Where it touched: the centre of the piece's chunk that made the contact (the body's own origin is where the
+    // object stood, which can be metres from a piece of it; the engine damages bonds around the reported point).
+    const handles = [ev.collider1(), ev.collider2()];
+    ends.forEach((b, k) => {
+      if (!b || b.static || !b.reactive) return;
+      const c = chunkOfCollider.get(handles[k])?.centre, t = b.rb.translation();
+      let x = t.x, y = t.y, z = t.z;
+      if (c) {
+        const q = b.rb.rotation(), [vx, vy, vz] = c;
+        const tx = 2 * (q.y * vz - q.z * vy), ty = 2 * (q.z * vx - q.x * vz), tz = 2 * (q.x * vy - q.y * vx);
+        x += vx + q.w * tx + (q.y * tz - q.z * ty);
+        y += vy + q.w * ty + (q.z * tx - q.x * tz);
+        z += vz + q.w * tz + (q.x * ty - q.y * tx);
+      }
+      M._destruct_web_contact(world, b.object, b.id, x, y, z, energy);
+    });
   });
   // Tell the engine where every body is now (rotation row-major, from the quaternion), then step it.
   const r = rot.p || (rot.p = M._malloc(36));
@@ -631,13 +648,15 @@ function step(dt) {
 }
 
 // ---------------------------------------------------------------- hitting things
+// 00 buckshot from a cylinder bore opens about 2.5 cm per metre (25 cm at 10 m): a 0.7 degree half-angle.
+const SPREAD_DEG = 0.7;
 function spread(msg) {
   const imp = IMPACTS.find((x) => x.name === "buckshot_pellet");
   const pellets = 9, output = M._malloc(pellets * 6 * 4);
   if (!output) throw new Error("Could not allocate shotgun results");
   try {
     const n = M._destruct_web_shoot_spread(world, ...msg.from, ...msg.d, imp.energy, 0.0042, 200,
-      imp.mass * imp.speed, pellets, 2, msg.seedLo >>> 0, msg.seedHi >>> 0, output, pellets);
+      imp.mass * imp.speed, pellets, SPREAD_DEG, msg.seedLo >>> 0, msg.seedHi >>> 0, output, pellets);
     if (n < 0) throw new Error("Invalid shotgun shot");
     views();
     let hit = 0;
@@ -651,7 +670,7 @@ function spread(msg) {
     runCommands();
     readEvents();
     readEffects();
-    out.log = `Shotgun: ${hit}/${n} pellets hit · 280 J each · 2° spread`;
+    out.log = `Shotgun: ${hit}/${n} pellets hit · 280 J each`;
   } finally { M._free(output); }
 }
 
