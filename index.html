@@ -130,6 +130,9 @@ select { width: 100%; text-transform: none; font-family: var(--mono); font-weigh
   <div class="hint" id="hint">Tap to hit · drag to orbit · pinch to zoom</div>
 </div>
 <div class="sheet" id="settings" role="dialog" aria-label="Settings" hidden>
+  <div class="sheet-row"><span>Physics (resets this scene)</span>
+    <select id="physics" aria-label="Physics"><option value="native">Our engine</option><option value="rapier">Rapier comparison</option></select></div>
+  <div class="sheet-row"><span id="physics-stats">Our engine · measuring</span></div>
   <div class="sheet-row"><span>Blast wave in front of it all</span><button class="btn" id="blast" type="button">Set off</button></div>
   <div class="sheet-row"><span>Sound</span><button class="btn toggle" id="sound" type="button" aria-pressed="true">On</button></div>
   <div class="sheet-row"><span>Slow motion</span><button class="btn toggle" id="slow" type="button" aria-pressed="false">Off</button></div>
@@ -221,12 +224,12 @@ window.addEventListener("resize", resize);
 // ---------------------------------------------------------------- chunk meshes
 // The engine's finished vertex buffer (position, normal, uv and a tag per vertex) arrives from the worker; this only
 // tints it and passes it to the GPU.
-function chunkGeometry(c, o, verts, frag) {
+function chunkGeometry(c, o, verts, frag, shade = 1) {
   const g0 = performance.now();
   perf.chunkMeshesDrawn++;
   const count = verts.length / 9;
   const col = new Float32Array(count * 3);
-  tintChunk(c, verts, col, onRange.get(o).info, frag);
+  tintChunk(c, verts, col, onRange.get(o).info, frag, shade);
   const inter = new THREE.InterleavedBuffer(verts, 9);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.InterleavedBufferAttribute(inter, 3, 0));
@@ -249,8 +252,9 @@ function chunkGeometry(c, o, verts, frag) {
 // its own fired surface with mortar left on (a greyer tint), and only a unit that cracked (a fragment) shows fresh
 // material.
 const JOINTED = new Set(["brick", "cinder_block"]);
-function tintChunk(c, verts, col, info, frag) {
-  const tint = info.tint, mortar = tint.map((x, i) => 0.45 * x + 0.55 * [0.62, 0.6, 0.56][i]);
+function tintChunk(c, verts, col, info, frag, shade = 1) {
+  // (A layered material: each layer its own shade of the tint, so a plywood edge shows its cross plies darker.)
+  const tint = info.tint.map((x) => x * shade), mortar = tint.map((x, i) => 0.45 * x + 0.55 * [0.62, 0.6, 0.56][i]);
   const fresh = JOINTED.has(info.name) && !frag ? mortar : info.breakTint || tint.map((x) => x * 0.42);
   const tone = state.breakLines ? 0.8 + 0.4 * (((c * 2654435761) >>> 0) % 1000) / 1000 : 1;
   for (let v = 0, count = verts.length / 9; v < count; v++) {
@@ -261,7 +265,7 @@ function tintChunk(c, verts, col, info, frag) {
 function retintAll() {
   for (const [c, e] of chunks) {
     const geo = e.mesh.geometry, col = geo.attributes.color;
-    tintChunk(c, geo.attributes.position.data.array, col.array, onRange.get(e.o).info, e.frag);
+    tintChunk(c, geo.attributes.position.data.array, col.array, onRange.get(e.o).info, e.frag, e.shade);
     col.needsUpdate = true;
   }
 }
@@ -301,11 +305,11 @@ function applyOps(ops) {
   for (const o of ops) {
     switch (o.op) {
       case "add": {
-        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.o, o.verts, o.frag), chunkMaterials(o.o, true, o.frag));
+        const mesh = new THREE.Mesh(chunkGeometry(o.c, o.o, o.verts, o.frag, o.shade), chunkMaterials(o.o, true, o.frag));
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.userData.chunk = o.c;
         mesh.userData.o = o.o;
-        chunks.set(o.c, { mesh, body: 0, o: o.o, frag: o.frag });
+        chunks.set(o.c, { mesh, body: 0, o: o.o, frag: o.frag, shade: o.shade ?? 1 });
         break;
       }
       case "retire": {
@@ -345,7 +349,7 @@ function applyOps(ops) {
         const e = chunks.get(o.c);
         if (!e) break;
         e.mesh.geometry.dispose();
-        e.mesh.geometry = chunkGeometry(o.c, e.o, o.verts, e.frag);
+        e.mesh.geometry = chunkGeometry(o.c, e.o, o.verts, e.frag, e.shade);
         break;
       }
     }
@@ -443,7 +447,7 @@ const SCENES = {
 function build() {
   const [kind, name] = state.target.split(":");
   const items = kind === "scene" ? SCENES[name].items : [{ target: state.target }];
-  sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
+  sim.postMessage({ type: "build", items, physics: $("physics").value, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
 }
 function onBuilt(b) {
   if (b.replaced) {
@@ -496,6 +500,7 @@ window.rangeBodySizes = () => {
 };
 window.rangeWatchJolts = () => sim.postMessage({ type: "watchJolts" });  // testing: perf.jolts counts settled pieces jolted
 window.rangeThreads = (n) => sim.postMessage({ type: "setting", threads: n });  // profiling: engine threads (0 = none)
+window.rangeCarry = (on) => sim.postMessage({ type: "setting", carry: !!on });  // testing: carrying weight on or off
 window.rangeShootAt = (nx, ny) => {  // a tap at a fraction of the canvas (profiling)
   const r = renderer.domElement.getBoundingClientRect();
   shoot(r.left + nx * r.width, r.top + ny * r.height);
@@ -511,6 +516,40 @@ window.rangeDrive = async (n) => {
   return { ...perf };
 };
 
+// ---------------------------------------------------------------- bars: reinforcing steel showing where concrete is gone
+// Each bar held in our physics, as a 16 mm rod between its two ends (hidden inside whole concrete; bare across a crack or
+// a crushed gap). Ribbed bars rust in a day outdoors: dark rusty brown (docs/research/rebar-cages.jpg).
+const barMaterial = new THREE.MeshStandardMaterial({ color: 0x5b4636, roughness: 0.8, metalness: 0.3 });
+const barGeometry = new THREE.CylinderGeometry(0.008, 0.008, 1, 6, 1);
+let barMesh = null, barCapacity = 0;
+const barM = new THREE.Matrix4(), barQ = new THREE.Quaternion(), barS = new THREE.Vector3(), barP = new THREE.Vector3();
+const barUp = new THREE.Vector3(0, 1, 0), barDir = new THREE.Vector3();
+function updateBars(bars) {
+  const n = bars ? bars.length / 7 : 0;
+  if (barMesh) barMesh.visible = n > 0;
+  if (!n) return;
+  if (n > barCapacity) {
+    if (barMesh) scene.remove(barMesh);  // (its geometry and material are shared)
+    barCapacity = Math.max(n, 2 * barCapacity, 64);
+    barMesh = new THREE.InstancedMesh(barGeometry, barMaterial, barCapacity);
+    barMesh.frustumCulled = false;
+    barMesh.castShadow = true;
+    scene.add(barMesh);
+  }
+  for (let i = 0; i < n; i++) {
+    const k = 7 * i;
+    barDir.set(bars[k + 3] - bars[k], bars[k + 4] - bars[k + 1], bars[k + 5] - bars[k + 2]);
+    const length = barDir.length();
+    barP.set((bars[k] + bars[k + 3]) / 2, (bars[k + 1] + bars[k + 4]) / 2, (bars[k + 2] + bars[k + 5]) / 2);
+    barQ.setFromUnitVectors(barUp, length > 1e-6 ? barDir.multiplyScalar(1 / length) : barUp);
+    barS.set(1, Math.max(length, 1e-4), 1);
+    barM.compose(barP, barQ, barS);
+    barMesh.setMatrixAt(i, barM);
+  }
+  barMesh.count = n;
+  barMesh.instanceMatrix.needsUpdate = true;
+}
+
 sim.onmessage = (e) => {
   const m = e.data;
   if (m.type === "ready") return onReady(m);
@@ -523,9 +562,13 @@ sim.onmessage = (e) => {
   applyEvents(m.events, m.markers);
   readEffects(m.fx);
   updateThrown(m.proj);
+  updateBars(m.bars);
   if (m.log) $("log").textContent = m.log;
   state.loose = m.loose;
   Object.assign(perf, m.perf);
+  const steps=Math.max(1,m.perf.steps), ms=(m.perf.physics+m.perf.engine+m.perf.commands)/steps;
+  $("physics-stats").textContent=`${m.physics==="native"?"Our engine":"Rapier"} · ${ms.toFixed(1)} ms/step · ${m.awake} awake`;
+
   if (m.stepped !== undefined) {
     waiting = false;
     while (waiters.length) waiters.shift()();
@@ -1148,7 +1191,7 @@ function shoot(clientX, clientY) {
   // The impactor arrives along the line of sight. A blast goes off a little in front of the surface.
   const back = imp.kind === "blast" ? 0.6 * Math.max(state.scale, 0.3) : 0;
   const p = hit.point.clone().addScaledVector(d, -back);
-  sim.postMessage({ type: "strike", imp: state.impact, force: state.force, o: hit.object.userData.o, p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
+  sim.postMessage({ type: "strike", imp: state.impact, force: state.force, o: hit.object.userData.o, from: [ray.ray.origin.x, ray.ray.origin.y, ray.ray.origin.z], p: [p.x, p.y, p.z], d: [d.x, d.y, d.z] });
 }
 
 // ---------------------------------------------------------------- throwing and swinging
@@ -1428,6 +1471,10 @@ function buildControls(m) {
     sim.postMessage({ type: "blast", imp: state.impact, force: state.force, p: [x, top * 0.5, front + Math.max(0.6, top * 0.6)] });
   });
   const toggle = (id, on) => { $(id).setAttribute("aria-pressed", String(on)); $(id).textContent = on ? "On" : "Off"; };
+  $("physics").addEventListener("change", () => {
+    const items=[...onRange.values()].map(v=>v.item);
+    sim.postMessage({type:"build",physics:$("physics").value,items,detail:state.detail,seed:state.seed,budget:state.budget,soft:state.soft,hold:state.hold});
+  });
   $("soft").addEventListener("click", () => {
     state.soft = !state.soft;
     toggle("soft", state.soft);
@@ -1445,7 +1492,7 @@ function buildControls(m) {
   $("reset-now").addEventListener("click", () => {
     const items = [...onRange.values()].map((v) => v.item);
     if (!items.length) return build();
-    sim.postMessage({ type: "build", items, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
+    sim.postMessage({ type: "build", items, physics: $("physics").value, detail: state.detail, seed: state.seed, budget: state.budget, soft: state.soft, hold: state.hold });
   });
   $("lines").addEventListener("click", () => { state.breakLines = !state.breakLines; toggle("lines", state.breakLines); retintAll(); refreshMaterials(); });
   $("budget").value = String(state.budget);

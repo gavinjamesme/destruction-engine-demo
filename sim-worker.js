@@ -6,13 +6,13 @@
 // Page -> here: init, build, step (n steps of 1/60 s), strike, throw, swingStart / swingMove / swingEnd, blast,
 // setting. Here -> page: ready (the catalog), then one "frame" per step request and per build: what changed (chunk
 // meshes, bodies), where moving bodies are, events, effects, thrown things, the log line and timings.
-import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js";
+let RAPIER;
 
 const KIND = ["blunt", "edge", "pointed", "blast"];
 const EVENT_NAMES = ["break", "crumble", "debris_hit", "collapsed", "deform", "crater"];
 const ROUND = new Set(["baseball", "fist", "kick", "baseball_bat", "wrecking_ball", "grenade", "firecracker"]);
-const PANES = new Set(["glass", "mirror"]);
-const SHEETS = new Set(["drywall", "cardboard", "paper", "tile", "sheet_metal", "tin", "leather", "pcb", "tempered_glass", "acrylic", "aluminum_foil"]);
+const PANES = new Set(["glass", "laminated_glass", "heat_strengthened_glass", "mirror"]);
+const SHEETS = new Set(["drywall", "plywood", "cardboard", "paper", "tile", "sheet_metal", "tin", "leather", "pcb", "tempered_glass", "acrylic", "aluminum_foil"]);
 // How many threads the engine's pool gets in the threaded build: leave room for the page and this worker. Must match
 // PTHREAD_POOL_SIZE in tools/build_web.ps1 (the threads are started ahead, at load).
 const POOL = Math.min(4, Math.max(1, (self.navigator.hardwareConcurrency || 2) - 2));
@@ -20,7 +20,7 @@ const POOL = Math.min(4, Math.max(1, (self.navigator.hardwareConcurrency || 2) -
 let M, world, phys, queue, threads = 0;
 let PHONE = false, HULL_POINTS = 64, COMMAND_BUDGET_MS = 8;
 const L = {};
-const state = { budget: 1, soft: false, detail: 1, scale: 1, hold: -1 };
+const state = { physics: "native", budget: 1, soft: false, detail: 1, scale: 1, hold: -1 };
 // Every object on the range: object id -> { info (its material), label, size, at (where its own origin stands) }.
 const objects = new Map();
 // Chunk and body ids are each object's own, so the maps below key them by object too.
@@ -70,19 +70,45 @@ function flush(extra) {
   // Moving bodies only: a settled piece keeps the pose the page already has.
   const poses = [];
   for (const [id, b] of bodies) {
+    if (b.native) { poses.push(id, ...nativePose(b.object, b.id)); continue; }
     if (b.static || b.rb.isSleeping()) continue;
     const t = b.rb.translation(), q = b.rb.rotation();
     poses.push(id, t.x, t.y, t.z, q.x, q.y, q.z, q.w);
   }
   const proj = [];
   for (const item of thrown) {
+    if (item.nativeId) {
+      const p = scratchFloats(7);
+      if (M._destruct_web_sim_projectile(world, item.nativeId, p)) {
+        views(); proj.push(item.id, ...H.f32.slice(p >> 2, (p >> 2) + 7), item.age);
+      }
+      continue;
+    }
     const t = item.rb.translation(), q = item.rb.rotation();
     proj.push(item.id, t.x, t.y, t.z, q.x, q.y, q.z, q.w, item.age);
+  }
+  // Bars of reinforced concrete held in our physics: drawn where they show (bare between pieces).
+  let bars = null;
+  if (state.physics === "native") {
+    const n = M._destruct_web_sim_bars(world, 0, 0);
+    if (n > 0) {
+      const ptr = scratchFloats(7 * n);
+      M._destruct_web_sim_bars(world, ptr, n);
+      views();
+      bars = H.f32.slice(ptr >> 2, (ptr >> 2) + 7 * n);
+    }
   }
   const p = new Float64Array(poses), j = new Float64Array(proj), fx = new Float32Array(out.fx);
   let loose = 0;
   for (const b of bodies.values()) if (!b.static) loose++;
-  self.postMessage({ type: "frame", ops: out.ops, poses: p, proj: j, fx, events: out.events, markers: out.markers, log: out.log,
+  let awake = perf.awake || 0;
+  if (state.physics !== "native") {
+    awake = [...bodies.values()].filter(b => !b.static && !b.rb.isSleeping()).length;
+    awake += thrown.filter(item => !item.rb.isSleeping()).length;
+    if (tool && !tool.rb.isSleeping()) awake++;
+  }
+  self.postMessage({ type: "frame", ops: out.ops, poses: p, proj: j, fx, bars, events: out.events, markers: out.markers, log: out.log,
+    physics: state.physics, awake,
     loose, pending: queued.length / (L.cmd || 1), perf: { ...perf }, ...extra }, [p.buffer, j.buffer, fx.buffer, ...out.transfer]);
   out = fresh();
 }
@@ -92,7 +118,6 @@ async function init(msg) {
   PHONE = msg.phone;
   HULL_POINTS = PHONE ? 24 : 64;
   COMMAND_BUDGET_MS = PHONE ? 4 : 8;
-  await RAPIER.init();
   let DestructModule = null;
   if (msg.threaded) {
     try { DestructModule = (await import("./destruct-mt.js")).default; } catch (err) { console.warn("threaded engine didn't load", err); }
@@ -116,12 +141,7 @@ async function init(msg) {
     fx: v(25), fxKind: v(26), fxPos: v(27), fxDir: v(28), fxSpread: v(29), fxCount: v(30), fxSize: v(31), fxSpeed: v(32), fxLife: v(33), fxColor: v(34),
   });
   M._free(lay);
-  world = M._destruct_world_create();
-  M._destruct_web_use_poses(world);
-  phys = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
-  queue = new RAPIER.EventQueue(true);
-  const groundBody = phys.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
-  phys.createCollider(RAPIER.ColliderDesc.cuboid(100, 0.5, 100).setFriction(0.9), groundBody);
+  world = M._destruct_web_sim_create();
   catalog();
   self.postMessage({
     type: "ready", version: str(M._destruct_version()), threads,
@@ -200,6 +220,9 @@ function chunkGeometry(o, c) {
   M._destruct_chunk_get_info(world, o, c, info);
   views();
   const mass = f32(info);
+  M._destruct_chunk_layer(world, o, c, info);  // (a layered material: its layer's shade)
+  views();
+  const shade = f32(info);
   M._free(info);
   const count = M._destruct_chunk_render_mesh(world, o, c, 0, 0);
   const buf = scratchFloats(count * 9);
@@ -220,7 +243,7 @@ function chunkGeometry(o, c) {
     r2 = Math.max(r2, dx * dx + dy * dy + dz * dz);
   }
   perf.geometry += performance.now() - g0;
-  return { verts, points, mass, centre, radius: Math.sqrt(r2), size: count ? [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] : [0, 0, 0] };
+  return { verts, points, mass, shade, centre, radius: Math.sqrt(r2), size: count ? [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]] : [0, 0, 0] };
 }
 
 // Collision groups (membership << 16 | what it collides with). Pieces fresh from a break pass through each other and
@@ -302,7 +325,81 @@ function applySpinFix() {
   }
   spinFix.clear();
 }
+
+function nativePose(object, body) {
+  const p = scratchFloats(12);
+  M._destruct_web_sim_pose(world, object, body, p);
+  views();
+  const a = H.f32.slice(p >> 2, (p >> 2) + 12);
+  const trace = a[0] + a[4] + a[8];
+  let x, y, z, w, k;
+  if (trace > 0) { k = Math.sqrt(trace + 1) * 2; w = k/4; x = (a[7]-a[5])/k; y = (a[2]-a[6])/k; z = (a[3]-a[1])/k; }
+  else if (a[0] > a[4] && a[0] > a[8]) { k = Math.sqrt(1+a[0]-a[4]-a[8])*2; x=k/4; y=(a[1]+a[3])/k; z=(a[2]+a[6])/k; w=(a[7]-a[5])/k; }
+  else if (a[4] > a[8]) { k=Math.sqrt(1+a[4]-a[0]-a[8])*2; y=k/4; x=(a[1]+a[3])/k; z=(a[5]+a[7])/k; w=(a[2]-a[6])/k; }
+  else { k=Math.sqrt(1+a[8]-a[0]-a[4])*2; z=k/4; x=(a[2]+a[6])/k; y=(a[5]+a[7])/k; w=(a[3]-a[1])/k; }
+  return [a[9], a[10], a[11], x, y, z, w];
+}
+// Sim alone owns collision bodies and consumes commands. This copy updates drawing only.
+function runNativeCommands() {
+  M._destruct_web_sim_sync(world);
+  const n = M._destruct_take_commands(world), base = M._destruct_commands(world);
+  // Geometry calls can grow the heap; copy commands before asking for geometry.
+  views();
+  const commands = H.u8.slice(base, base + n * L.cmd);
+  if (queueBuf.bytes < commands.length) {
+    if (queueBuf.ptr) M._free(queueBuf.ptr);
+    queueBuf.bytes = Math.max(commands.length, 65536);
+    queueBuf.ptr = M._malloc(queueBuf.bytes);
+  }
+  views(); H.u8.set(commands, queueBuf.ptr);
+  for (let i=0; i<n; ++i) {
+    views();
+    const p=queueBuf.ptr+i*L.cmd, type=i32(p+L.type), o=u32(p+L.object), chunk=u32(p+L.chunk), id=u64(p+L.body);
+    const c=key(o,chunk), body=key(o,id);
+    if (type===0 || type===9) {
+      const frag = type===0 ? u32(p+L.source)!==0xFFFFFFFF : chunks.get(c)?.frag;
+      const g=chunkGeometry(o,chunk);
+      if (type===0) chunks.set(c,{body:0,frag});
+      out.ops.push({op:type===0?"add":"deform", c,o,verts:g.verts,frag,shade:g.shade});
+      out.transfer.push(g.verts.buffer);
+    } else if (type===1) {
+      const fade=i32(p+L.flag)!==0; chunks.delete(c); out.ops.push({op:"retire",c,fade});
+    } else if (type===2) {
+      const isStatic=i32(p+L.isStatic)!==0;
+      bodies.set(body,{native:true,object:o,id,static:isStatic});
+      out.ops.push({op:"body",id:body,o,static:isStatic,pose:nativePose(o,id)});
+    } else if (type===3) {
+      const entry=chunks.get(c); if(entry) entry.body=body;
+      out.ops.push({op:"attach",c,id:body});
+    } else if(type===4) { bodies.delete(body); out.ops.push({op:"unbody",id:body}); }
+  }
+}
+function nativeStep(dt) {
+  if (tool?.nativeId) M._destruct_web_sim_move(world,tool.nativeId,...tool.p,...tool.q,dt);
+  const p=scratchFloats(5);
+  M._destruct_web_sim_step(world,dt,p);
+  views();
+  perf.physics+=f32(p); perf.engine+=f32(p+4); perf.commands+=f32(p+8); perf.awake=f32(p+12);
+  const hitCount=M._destruct_web_sim_hits(world,0,0);
+  if(hitCount) {
+    const hits=scratchFloats(hitCount*6);
+    M._destruct_web_sim_hits(world,hits,hitCount); views();
+    for(let i=0;i<hitCount;++i) {
+      const h=hits+i*24, blast=f32(h+12)===4;
+      marker(blast?"break":"debris_hit",f32(h),f32(h+4),f32(h+8),blast?1:.25);
+      out.log=blast?"Exploded where it landed":"Impact";
+    }
+  }
+  const projectilePose=scratchFloats(7);
+  for(let i=thrown.length-1;i>=0;--i) {
+    const item=thrown[i]; item.age+=dt;
+    if(item.age>10 || !M._destruct_web_sim_projectile(world,item.nativeId,projectilePose)) dropThrown(item);
+  }
+  const t=performance.now(); runNativeCommands(); readEvents(); readEffects(); perf.commands+=performance.now()-t;
+}
+
 function runCommands() {
+  if (state.physics === "native") return runNativeCommands();
   const taken = M._destruct_take_commands(world);
   views();
   if (taken > 0) {
@@ -336,7 +433,7 @@ function runCommands() {
         keepGeometry(e, g);
         chunks.set(c, e);
         // frag: cut from another chunk by a hit (not one the object was built with)
-        out.ops.push({ op: "add", c, o, verts: g.verts, frag: u32(p + L.source) !== 0xFFFFFFFF });
+        out.ops.push({ op: "add", c, o, verts: g.verts, frag: u32(p + L.source) !== 0xFFFFFFFF, shade: g.shade });
         out.transfer.push(g.verts.buffer);
         break;
       }
@@ -468,9 +565,9 @@ function readEffects() {
 // ---------------------------------------------------------------- building the range
 // The range holds one or more objects: a scene (build) replaces them all, add puts one more beside them.
 function clearScene() {
-  for (const b of bodies.values()) phys.removeRigidBody(b.rb);
+  if (state.physics !== "native") for (const b of bodies.values()) phys.removeRigidBody(b.rb);
   bodies.clear(); chunks.clear(); byCollider.clear(); chunkOfCollider.clear();
-  for (const o of objects.keys()) M._destruct_remove_object(world, o);
+  for (const o of objects.keys()) (state.physics === "native" ? M._destruct_web_sim_remove_object : M._destruct_remove_object)(world, o);
   objects.clear();
   M._destruct_take_commands(world);
   M._destruct_take_events(world);
@@ -488,6 +585,9 @@ function itemSize(item) {
   if (kind === "object") return PRESETS.get(name).size;
   const info = MATERIALS.get(name);
   if (info.pane) return [3, 2, 0.04];
+  if (name === "plywood") return [2.4, 1.2, 0.018];  // an 18 mm sheet (five plies), stood on its long edge
+  if (name === "drywall") return [2.4, 1.2, 0.0125];  // a 12.5 mm board
+  if (name === "cardboard") return [1.6, 1.0, 0.004];  // single-wall corrugated board, 4 mm
   if (info.sheet) return [3, 2, name === "sheet_metal" ? 0.004 : name === "aluminum_foil" ? 0.001 : 0.04];
   return [5, 3, 0.6];
 }
@@ -507,16 +607,16 @@ function makeObject(item, seed) {
   // The page's Hold setting (free 1, base held 2, pinned 4; -1: as the object was made).
   if (item.anchor === undefined && state.hold >= 0) anchor = state.hold;
   const custom = kind !== "object" || item.size;
+  const at = item.at || [0, 0, 0];
   const o = withString(name, (np) => withString(material, (mp) => withString(preset, (pp) =>
     M._destruct_web_make(world, np, mp, pp, custom ? size[0] : 0, custom ? size[1] : 0, custom ? size[2] : 0, shell, anchor,
-      state.detail, seed))));
+      state.detail, seed, ...at))));
   if (!o) return null;
-  const at = item.at || [0, 0, 0];
   // Where it stands: the object itself (body 0) is placed there, and its first bodies start there.
   const r = M._malloc(36);
   views();
   H.f32.set([1, 0, 0, 0, 1, 0, 0, 0, 1], r >> 2);
-  M._destruct_web_set_pose(o, 0, r, at[0], at[1], at[2]);
+  if (state.physics !== "native") M._destruct_web_set_pose(o, 0, r, at[0], at[1], at[2]);
   M._free(r);
   const info = materialInfo(o);
   // Phones: full crumbling, but fewer loose pieces at once and crumbs as particles sooner.
@@ -536,10 +636,28 @@ function rangeScale() {
   return Math.min(1, span / 3);
 }
 
-function build(msg) {
+async function build(msg) {
   clearScene();
+  const backend = msg.physics || state.physics;
+  if (backend === "rapier" && !phys) {
+    RAPIER = (await import("https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js")).default;
+    await RAPIER.init();
+    phys = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+    queue = new RAPIER.EventQueue(true);
+    const ground = phys.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
+    phys.createCollider(RAPIER.ColliderDesc.cuboid(100, 0.5, 100).setFriction(0.9), ground);
+  }
+  if (backend !== state.physics) {
+    if (state.physics === "native") M._destruct_web_sim_destroy(world);
+    else M._destruct_world_destroy(world);
+    state.physics = backend;
+    world = backend === "native" ? M._destruct_web_sim_create() : M._destruct_world_create();
+    if (backend !== "native") M._destruct_web_use_poses(world);
+  }
+  for (const name of Object.keys(perf)) perf[name]=0;
   state.detail = msg.detail; state.budget = msg.budget; state.soft = msg.soft; state.hold = msg.hold ?? -1;
   M._destruct_world_set_energy_budget(world, state.budget);
+  if (state.carry === false) M._destruct_world_set_carry_weight(world, 0);
   M._destruct_world_set_soft_sim(world, state.soft ? 1 : 0);
   msg.items.forEach((item, i) => makeObject(item, msg.seed + i * 7919));
   state.scale = rangeScale();
@@ -563,6 +681,7 @@ function addItem(msg) {
 // ---------------------------------------------------------------- stepping
 const rot = { p: 0 };
 function step(dt) {
+  if (state.physics === "native") return nativeStep(dt);
   // Air drag (0.5 rho Cd A v^2), from each piece's mass and its material's density: dust slows fast, bricks hardly.
   for (const b of bodies.values()) {
     if (b.static) continue;
@@ -679,6 +798,11 @@ function strike(msg) {
   const imp = IMPACTS[msg.imp], [px, py, pz] = msg.p, [dx, dy, dz] = msg.d;
   const target = objects.get(msg.o);
   if (!target) return;
+  if (state.physics === "native" && imp.kind === "pointed") {
+    const from=msg.from || [px-dx*.05, py-dy*.05, pz-dz*.05], speed=imp.speed*(msg.force||1);
+    withString(imp.name,np=>M._destruct_web_sim_launch(world,np,...from,dx*speed,dy*speed,dz*speed));
+    return;
+  }
   const o = M._malloc(28);
   const force = msg.force || 1;  // the preset's speed scale
   withString(imp.name, (np) => M._destruct_web_strike(world, msg.o, np, px, py, pz, dx, dy, dz, force, 0, o));
@@ -727,6 +851,11 @@ const projectileColliders = new Map();  // collider handle -> thrown thing or th
 function throwImpactor(msg) {
   if (thrown.length >= 12) dropThrown(thrown[0]);
   const imp = IMPACTS[msg.imp], s = impactorShape(imp), [fx, fy, fz] = msg.from, [vx, vy, vz] = msg.v;
+  if (state.physics === "native") {
+    const nativeId=withString(imp.name,np=>M._destruct_web_sim_launch(world,np,fx,fy,fz,vx,vy,vz));
+    if (nativeId) thrown.push({id:msg.id,nativeId,imp,age:0});
+    return;
+  }
   const rb = phys.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(fx, fy, fz)
     .setLinvel(vx, vy, vz).setAngvel({ x: Math.random() * 6 - 3, y: Math.random() * 6 - 3, z: Math.random() * 6 - 3 })
     .setCcdEnabled(true).setLinearDamping(0.01).setAngularDamping(0.3));
@@ -740,6 +869,11 @@ function throwImpactor(msg) {
   out.log = `threw a ${imp.label} at ${Math.hypot(vx, vy, vz).toFixed(0)} m/s`;
 }
 function dropThrown(item) {
+  if (item.nativeId) {
+    M._destruct_web_sim_remove(world,item.nativeId);
+    const i=thrown.indexOf(item); if(i>=0) thrown.splice(i,1);
+    return;
+  }
   projectileColliders.delete(item.collider.handle);
   if (phys.getRigidBody(item.rb.handle)) phys.removeRigidBody(item.rb);
   const i = thrown.indexOf(item);
@@ -752,6 +886,10 @@ let tool = null;
 function startSwing(msg) {
   if (tool) endSwing();
   const imp = IMPACTS[msg.imp], s = impactorShape(imp), [x, y, z] = msg.p, [qx, qy, qz, qw] = msg.q;
+  if (state.physics === "native") {
+    const nativeId=withString(imp.name,np=>M._destruct_web_sim_hold(world,np,x,y,z,qx,qy,qz,qw));
+    tool={nativeId,p:msg.p,q:msg.q}; return;
+  }
   const rb = phys.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y, z).setRotation({ x: qx, y: qy, z: qz, w: qw }));
   const desc = (s.ball ? RAPIER.ColliderDesc.ball(s.ball) : RAPIER.ColliderDesc.cuboid(...s.box))
     .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
@@ -763,6 +901,7 @@ function startSwing(msg) {
 }
 function moveSwing(msg) {
   if (!tool) return;
+  if (tool.nativeId) { tool.p=msg.p; tool.q=msg.q||tool.q; return; }
   const [x, y, z] = msg.p, now = performance.now(), dt = Math.max((now - tool.lastT) / 1000, 1 / 240);
   tool.velocity = [(x - tool.last[0]) / dt, (y - tool.last[1]) / dt, (z - tool.last[2]) / dt];
   tool.last = [x, y, z]; tool.lastT = now;
@@ -772,6 +911,7 @@ function endSwing() {
   if (!tool) return;
   const t = tool;
   tool = null;
+  if (t.nativeId) { M._destruct_web_sim_remove(world,t.nativeId); return; }
   projectileColliders.delete(t.collider.handle);
   setTimeout(() => { if (phys.getRigidBody(t.rb.handle)) phys.removeRigidBody(t.rb); }, 250);
 }
@@ -859,6 +999,7 @@ const handlers = {
   setting(msg) {
     if (msg.soft !== undefined) { state.soft = msg.soft; M._destruct_world_set_soft_sim(world, msg.soft ? 1 : 0); }
     if (msg.budget !== undefined) { state.budget = msg.budget; M._destruct_world_set_energy_budget(world, msg.budget); }
+    if (msg.carry !== undefined) { state.carry = msg.carry; M._destruct_world_set_carry_weight(world, msg.carry ? 1 : 0); }
     if (msg.threads !== undefined) {  // profiling: the pool's size (no more than the threads started at load)
       M._destruct_web_set_threads(Math.min(Math.max(msg.threads, 0), threads > 0 ? POOL : 0));
       self.postMessage({ type: "threads", threads: M._destruct_web_threads() });
